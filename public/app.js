@@ -37,8 +37,8 @@
     if (!proj) return;
     var rows = extractRows(proj.data !== undefined ? proj.data : proj);
     rows.forEach(function (row) {
-      var id = pick(row, ['id', 'id_blog', 'idBlog']);
-      var nome = pick(row, ['blog', 'nome', 'name', 'projeto', 'site']);
+      var id = pick(row, ['id', 'id_blog', 'idBlog', 'project_id']);
+      var nome = pick(row, ['blog_name', 'blog', 'nome', 'name', 'projeto', 'site']);
       if (id !== undefined && id !== null && nome) projectNames[id] = String(nome);
     });
   }
@@ -769,6 +769,86 @@
 
   // ---- defensive normalizers ----
 
+  function isPlainObject(v) {
+    return v !== null && typeof v === 'object' && !Array.isArray(v);
+  }
+
+  // Chaves financeiras/identificadoras usadas para pontuar candidatos durante
+  // a busca profunda em extractRows - testadas contra TODAS as keys do
+  // primeiro item de cada candidato (nao contra valores).
+  var FINANCIAL_KEY_RE = /receita|revenue|gam_revenue|spend|gasto|net_profit|real_profit|lucro|profit|roi|ecpm|blog|project/i;
+
+  function scoreCandidateRows(rows) {
+    if (!rows || !rows.length) return 0;
+    var first = rows[0];
+    if (!isPlainObject(first)) return 0;
+    var keys = Object.keys(first);
+    var score = 0;
+    for (var i = 0; i < keys.length; i++) {
+      if (FINANCIAL_KEY_RE.test(keys[i])) score++;
+    }
+    return score;
+  }
+
+  // Busca recursiva (BFS) na arvore inteira quando os candidatos rasos nao
+  // acham nada - o payload real de resumo_usuarios costuma vir aninhado mais
+  // fundo (ex.: por gestor -> blogs, ou como mapa id -> objeto). Profundidade
+  // maxima 5; protecao contra ciclos via WeakSet (fallback pra array se
+  // WeakSet nao existir). Candidato = (a) array com >=1 objeto plano, ou
+  // (b) objeto cujos values sao >=2 objetos planos (map keyed).
+  function deepFindCandidates(root) {
+    var MAX_DEPTH = 5;
+    var candidates = []; // {rows, score} - insercao em ordem BFS (mais raso primeiro)
+    var hasWeakSet = typeof WeakSet === 'function';
+    var visitedSet = hasWeakSet ? new WeakSet() : null;
+    var visitedArr = hasWeakSet ? null : [];
+
+    function markSeen(node) {
+      if (visitedSet) {
+        if (visitedSet.has(node)) return true;
+        visitedSet.add(node);
+        return false;
+      }
+      if (visitedArr.indexOf(node) !== -1) return true;
+      visitedArr.push(node);
+      return false;
+    }
+
+    var queue = [{ node: root, depth: 0 }];
+    while (queue.length) {
+      var cur = queue.shift();
+      var node = cur.node;
+      var depth = cur.depth;
+      if (node === null || typeof node !== 'object') continue;
+      if (markSeen(node)) continue;
+
+      if (Array.isArray(node)) {
+        if (node.length && isPlainObject(node[0])) {
+          candidates.push({ rows: node, score: scoreCandidateRows(node) });
+        }
+        if (depth < MAX_DEPTH) {
+          node.forEach(function (item) {
+            if (item !== null && typeof item === 'object') queue.push({ node: item, depth: depth + 1 });
+          });
+        }
+      } else {
+        var values = Object.keys(node).map(function (k) { return node[k]; });
+        var plainCount = 0;
+        for (var vi = 0; vi < values.length; vi++) { if (isPlainObject(values[vi])) plainCount++; }
+        if (plainCount >= 2) {
+          candidates.push({ rows: values, score: scoreCandidateRows(values) });
+        }
+        if (depth < MAX_DEPTH) {
+          values.forEach(function (v) {
+            if (v !== null && typeof v === 'object') queue.push({ node: v, depth: depth + 1 });
+          });
+        }
+      }
+    }
+
+    return candidates;
+  }
+
   function extractRows(data) {
     if (data === null || data === undefined) return [];
     var candidates = [data, data.rows, data.projetos, data.items, data.data];
@@ -778,29 +858,114 @@
     }
     if (typeof data === 'object' && !Array.isArray(data)) {
       var vals = Object.keys(data).map(function (k) { return data[k]; });
-      if (vals.length && typeof vals[0] === 'object' && vals[0] !== null && !Array.isArray(vals[0])) {
-        return vals;
-      }
+      // Exige >=2 valores-objeto pra tratar como "map keyed" (mesmo criterio
+      // do candidato (b) na busca profunda). Com >=1 isso capturava wrappers
+      // triviais de uma chave so (ex.: {data: {...}}) como se fossem a linha
+      // certa, o que impedia o fallback recursivo abaixo de rodar.
+      var plainValsCount = 0;
+      for (var vi = 0; vi < vals.length; vi++) { if (isPlainObject(vals[vi])) plainValsCount++; }
+      if (plainValsCount >= 2) return vals;
+    }
+
+    // Caminho dedicado pro shape REAL confirmado em producao: data.users[]
+    // (um por gestor), cada um com .projetos[] (um por blog). As linhas que
+    // interessam pro dashboard sao os projetos, entao concatena os projetos
+    // de todos os usuarios antes de cair no fallback recursivo generico.
+    if (data && Array.isArray(data.users) && data.users.length) {
+      var fromUsers = [];
+      var usersHaveProjetos = false;
+      data.users.forEach(function (u) {
+        if (u && Array.isArray(u.projetos)) {
+          usersHaveProjetos = true;
+          u.projetos.forEach(function (p) { fromUsers.push(p); });
+        }
+      });
+      if (usersHaveProjetos && fromUsers.length) return fromUsers;
+    }
+
+    // Nada encontrado nos candidatos rasos - busca recursiva na arvore
+    // inteira, pontua cada candidato pelas chaves financeiras e usa o de
+    // maior pontuacao (empate: o mais raso, ja garantido pela ordem BFS +
+    // sort estavel).
+    var deep = deepFindCandidates(data);
+    if (deep.length) {
+      deep.sort(function (a, b) { return b.score - a.score; });
+      if (deep[0].score > 0) return deep[0].rows;
     }
     return [];
   }
 
+  // Lista apenas NOMES de chaves (nunca valores) ate `maxDepth` niveis - usado
+  // so pro diagnostico no console quando o formato do snapshot nao e
+  // reconhecido, sem arriscar despejar dado sensivel.
+  function summarizeKeysForDiagnostics(obj, maxDepth) {
+    if (obj === null || typeof obj !== 'object') return typeof obj;
+    if (maxDepth <= 0) return Array.isArray(obj) ? '[array]' : '[object]';
+    if (Array.isArray(obj)) {
+      if (!obj.length) return '[array vazio]';
+      return ['[array len=' + obj.length + ']', summarizeKeysForDiagnostics(obj[0], maxDepth - 1)];
+    }
+    var out = {};
+    Object.keys(obj).forEach(function (k) {
+      out[k] = summarizeKeysForDiagnostics(obj[k], maxDepth - 1);
+    });
+    return out;
+  }
+
   function resolveNome(row) {
-    var direct = pick(row, ['blog', 'nome', 'name', 'projeto', 'site']);
+    var direct = pick(row, ['blog_name', 'blog', 'nome', 'name', 'projeto', 'project', 'site', 'domain']);
     if (direct) return direct;
-    var id = pick(row, ['id', 'id_blog', 'idBlog']);
+    var id = pick(row, ['id', 'id_blog', 'idBlog', 'project_id']);
     if (id !== undefined && projectNames[id]) return projectNames[id];
     return '—';
   }
 
+  // Shape real confirmado em producao (resumo_usuarios): os financeiros NAO
+  // sao flat no objeto do projeto, vem aninhados em sub-objetos por dominio:
+  //   active_view: { revenue, item_level_impressions, ... }  (receita bruta)
+  //   investment:  { spend, results, cost_per_result }
+  //   billing:     { gross_profit, revshare_profit, net_profit, commission, roi_percentage }
+  // Prioriza esses caminhos aninhados; cai pros picks flat (shapes antigos/
+  // outras tools) quando o sub-objeto nao existe.
   function normalizeRow(row) {
-    var receita = toNumber(pick(row, ['receita', 'revenue', 'receita_adx', 'adx_revenue', 'receita_total']));
-    var gasto = toNumber(pick(row, ['gasto', 'spend', 'gasto_fb', 'fb_spend', 'custo']));
-    var lucro = toNumber(pick(row, ['lucro', 'profit', 'resultado']));
+    var receita = (row && row.active_view) ? toNumber(row.active_view.revenue) : null;
+    if (receita === null) {
+      receita = toNumber(pick(row, ['receita', 'revenue', 'gam_revenue', 'adx_revenue', 'receita_adx', 'receita_total', 'adx']));
+    }
+
+    var gasto = (row && row.investment) ? toNumber(row.investment.spend) : null;
+    if (gasto === null) {
+      gasto = toNumber(pick(row, ['gasto', 'spend', 'gasto_fb', 'fb_spend', 'custo', 'cost']));
+    }
+
+    // net_profit/real_profit sao os liquidos (regra de revshare da operacao) -
+    // o numero real, priorizados sobre profit generico.
+    var lucro = (row && row.billing) ? toNumber(row.billing.net_profit) : null;
+    if (lucro === null) {
+      lucro = toNumber(pick(row, ['lucro', 'net_profit', 'real_profit', 'profit', 'resultado']));
+    }
     if (lucro === null && receita !== null && gasto !== null) lucro = receita - gasto;
-    var roi = toNumber(pick(row, ['roi', 'roi_pct']));
-    if (roi === null && lucro !== null && gasto) roi = (lucro / gasto) * 100;
-    var ecpm = toNumber(pick(row, ['ecpm', 'ecpm_medio', 'cpm']));
+
+    // billing.roi_percentage NAO e confiavel (valor observado nao bate com
+    // net_profit/spend - semantica ambigua no payload real). Prioriza sempre
+    // o calculo lucro/gasto*100, que fica consistente com a coluna de lucro
+    // (liquido) exibida na tabela; so cai pro pick flat se o calculo nao for
+    // possivel (falta lucro ou gasto).
+    var roi = (lucro !== null && gasto) ? (lucro / gasto) * 100 : null;
+    if (roi === null) {
+      roi = toNumber(pick(row, ['roi', 'roi_pct']));
+    }
+
+    var ecpm = null;
+    if (row && row.active_view && row.active_view.revenue !== undefined && row.active_view.item_level_impressions) {
+      var avRevenue = toNumber(row.active_view.revenue);
+      var avImpressions = toNumber(row.active_view.item_level_impressions);
+      if (avRevenue !== null && avImpressions) ecpm = (avRevenue / avImpressions) * 1000;
+    }
+    if (ecpm === null) {
+      ecpm = toNumber(pick(row, ['ecpm', 'ecpm_medio', 'cpm']));
+    }
+
     return { nome: resolveNome(row), receita: receita, gasto: gasto, lucro: lucro, roi: roi, ecpm: ecpm };
   }
 
@@ -990,6 +1155,12 @@
 
     var resumoData = snapshot.resumoUsuarios ? (snapshot.resumoUsuarios.data !== undefined ? snapshot.resumoUsuarios.data : snapshot.resumoUsuarios) : null;
     var rawRows = extractRows(resumoData);
+
+    if (!rawRows.length && snapshot.resumoUsuarios !== null && snapshot.resumoUsuarios !== undefined) {
+      var diagTarget = (resumoData !== null && resumoData !== undefined) ? resumoData : snapshot.resumoUsuarios;
+      console.warn('[cortex] resumoUsuarios com formato nao reconhecido. Chaves de topo:', summarizeKeysForDiagnostics(diagTarget, 2));
+    }
+
     var rows = rawRows.map(normalizeRow);
 
     renderMetricCards(rows);

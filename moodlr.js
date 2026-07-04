@@ -36,6 +36,25 @@ const HEAVY_TOOL_OPTS = {
   analise_campanhas: { timeoutMs: 60_000, maxAttempts: 2 },
 };
 
+// O moodlr-ops devolve credenciais e PII EMBUTIDAS nos payloads (admin_pass,
+// user_pass, rest_api_key, cpf, pix, e-mail...). Nada disso pode sair do
+// proxy: nem pro localStorage do gestor, nem pro contexto do modelo.
+// Chaves que casarem são removidas em profundidade de todo resultado de tool.
+const SENSITIVE_KEY_RE = /(pass|secret|api_?key|token|credential|cpf|pix|mobile|e-?mail)/i;
+const SENSITIVE_KEYS_EXACT = new Set(['admin_user', 'user_admin', 'rest_username']);
+
+/** Remove chaves sensíveis em profundidade. Exportada para testes. */
+export function sanitizePayload(value, depth = 0) {
+  if (depth > 10 || value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((v) => sanitizePayload(v, depth + 1));
+  const out = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (SENSITIVE_KEY_RE.test(k) || SENSITIVE_KEYS_EXACT.has(k)) continue;
+    out[k] = sanitizePayload(v, depth + 1);
+  }
+  return out;
+}
+
 // O moodlr-ops carrega as tools sob demanda (lazy load): sem um tool_search
 // prévio, tools/call pode falhar com "not loaded". Estas 4 buscas carregam
 // todos os grupos de tools (guia operacional do moodlr-ops).
@@ -415,7 +434,7 @@ export async function callTool(toolName, args, moodlrToken) {
   const opts = HEAVY_TOOL_OPTS[toolName] || {};
   try {
     const { result } = await rpcWithSessionFallback('tools/call', params, moodlrToken, opts);
-    return unwrapToolResult(result, toolName);
+    return sanitizePayload(unwrapToolResult(result, toolName));
   } catch (err) {
     if (!looksLikeNotLoadedError(err)) throw err;
     // Lazy load do servidor: destrava com tool_search pelas palavras-chave dos
@@ -427,7 +446,7 @@ export async function callTool(toolName, args, moodlrToken) {
       } catch { /* best-effort: se a busca falhar, a retentativa abaixo decide */ }
     }
     const { result } = await rpcRequest('tools/call', params, moodlrToken, sessionId, opts);
-    return unwrapToolResult(result, toolName);
+    return sanitizePayload(unwrapToolResult(result, toolName));
   }
 }
 
