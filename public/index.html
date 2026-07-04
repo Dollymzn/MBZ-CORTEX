@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MBZ::CORTEX — Centro de Comando</title>
+<meta name="description" content="MBZ::CORTEX — cérebro central da operação de tráfego da Moodlr LLC" />
+<link rel="icon" type="image/svg+xml" href="favicon.svg" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- ============================== BOOT ANIMATION (first-visit only) ============================== -->
+<div class="boot-overlay" id="boot-overlay" aria-hidden="true">
+  <div class="boot-curtain boot-curtain-top" aria-hidden="true"></div>
+  <div class="boot-curtain boot-curtain-bottom" aria-hidden="true"></div>
+  <div class="boot-crt-line" aria-hidden="true"></div>
+  <div class="boot-flicker" aria-hidden="true"></div>
+
+  <div class="boot-grid-floor-wrap" aria-hidden="true"><div class="boot-grid-floor"></div></div>
+  <div class="boot-particles" id="boot-particles" aria-hidden="true"></div>
+
+  <pre class="boot-terminal" id="boot-terminal" aria-hidden="true"></pre>
+
+  <div class="boot-brain-wrap" id="boot-brain-wrap" aria-hidden="true">
+    <svg class="boot-brain-svg" viewBox="0 0 300 260" width="280" height="243">
+      <g class="brain-outline">
+        <path class="brain-contour" d="M150,60 C130,40 110,36 95,36 C65,36 44,65 44,110 C44,145 44,155 50,180 C58,210 80,228 100,226 C118,224 138,214 150,200 C162,214 182,224 200,226 C220,228 242,210 250,180 C256,155 256,145 256,110 C256,65 235,36 205,36 C190,36 170,40 150,60 Z"/>
+        <path class="brain-fissure" d="M150,60 L150,200"/>
+      </g>
+
+      <g class="brain-trails brain-trails-left">
+        <path class="trail" d="M70,92 L92,92 L92,70 L118,70"/>
+        <path class="trail" d="M64,132 L96,132 L96,112 L124,112"/>
+        <path class="trail" d="M58,164 L86,164 L86,188 L114,188"/>
+        <path class="trail" d="M76,198 L104,198 L104,178"/>
+        <path class="trail" d="M50,112 L50,142 L72,142"/>
+        <path class="trail" d="M62,80 L62,60 L88,60"/>
+      </g>
+      <g class="brain-trails brain-trails-right">
+        <path class="trail" d="M230,92 L208,92 L208,70 L182,70"/>
+        <path class="trail" d="M236,132 L204,132 L204,112 L176,112"/>
+        <path class="trail" d="M242,164 L214,164 L214,188 L186,188"/>
+        <path class="trail" d="M224,198 L196,198 L196,178"/>
+        <path class="trail" d="M250,112 L250,142 L228,142"/>
+        <path class="trail" d="M238,80 L238,60 L212,60"/>
+      </g>
+
+      <g class="brain-nodes">
+        <circle class="node" cx="118" cy="70" r="3"/>
+        <circle class="node" cx="124" cy="112" r="3"/>
+        <circle class="node" cx="114" cy="188" r="3"/>
+        <circle class="node" cx="104" cy="178" r="3"/>
+        <circle class="node" cx="182" cy="70" r="3"/>
+        <circle class="node" cx="176" cy="112" r="3"/>
+        <circle class="node" cx="186" cy="188" r="3"/>
+        <circle class="node" cx="196" cy="178" r="3"/>
+      </g>
+
+      <g class="brain-waves">
+        <circle class="wave" cx="150" cy="131" r="10"/>
+        <circle class="wave wave-2" cx="150" cy="131" r="10"/>
+      </g>
+
+      <g class="brain-chips">
+        <g class="chip chip-top">
+          <rect x="118" y="6" width="64" height="22" rx="2"/>
+          <text x="150" y="20" class="chip-label" text-anchor="middle">MBZ-NPU</text>
+          <line class="chip-pin" x1="130" y1="28" x2="130" y2="34"/>
+          <line class="chip-pin" x1="150" y1="28" x2="150" y2="34"/>
+          <line class="chip-pin" x1="170" y1="28" x2="170" y2="34"/>
+          <circle class="chip-led" cx="126" cy="14" r="2"/>
+          <path class="chip-trace" d="M150,34 L150,60"/>
+        </g>
+        <g class="chip chip-left">
+          <rect x="8" y="104" width="32" height="54" rx="2"/>
+          <line class="chip-pin" x1="40" y1="120" x2="47" y2="120"/>
+          <line class="chip-pin" x1="40" y1="142" x2="47" y2="142"/>
+          <circle class="chip-led" cx="15" cy="112" r="2"/>
+          <path class="chip-trace" d="M47,131 L58,131"/>
+        </g>
+        <g class="chip chip-right">
+          <rect x="260" y="104" width="32" height="54" rx="2"/>
+          <line class="chip-pin" x1="260" y1="120" x2="253" y2="120"/>
+          <line class="chip-pin" x1="260" y1="142" x2="253" y2="142"/>
+          <circle class="chip-led" cx="285" cy="112" r="2"/>
+          <path class="chip-trace" d="M253,131 L242,131"/>
+        </g>
+      </g>
+    </svg>
+  </div>
+
+  <div class="boot-logo-wrap" id="boot-logo-wrap" aria-hidden="true">
+    <h1 class="logo logo-lg boot-logo">
+      <span class="logo-mbz">MBZ</span><span class="logo-sep">::</span><span class="logo-cortex">CORTEX</span>
+    </h1>
+    <p class="tagline boot-tagline" id="boot-tagline"></p>
+  </div>
+
+  <div class="boot-flash" aria-hidden="true"></div>
+
+  <div class="boot-skip-hint" id="boot-skip-hint">[ clique para pular ]</div>
+</div>
+
+<!-- ============================== BACKGROUND FX ============================== -->
+<div class="bg-grid" aria-hidden="true"></div>
+<div class="scanlines" aria-hidden="true"></div>
+
+<!-- ============================== ONBOARDING MODAL ============================== -->
+<div class="overlay hidden" id="onboarding-overlay">
+  <div class="onboarding-modal" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
+    <div class="modal-topbar"></div>
+    <div class="onboarding-body">
+      <h1 class="logo logo-lg" id="onboarding-title">
+        <span class="logo-mbz">MBZ</span><span class="logo-sep">::</span><span class="logo-cortex">CORTEX</span>
+      </h1>
+      <p class="tagline">CENTRO DE COMANDO // MBZ MEDIA</p>
+
+      <form id="onboarding-form" class="onboarding-form" novalidate>
+        <div class="field">
+          <label for="ob-name">Seu nome</label>
+          <input id="ob-name" name="name" type="text" placeholder="Como te chamamos?" autocomplete="name" required />
+        </div>
+
+        <div class="field">
+          <label for="ob-token">Sua key do moodlr-ops</label>
+          <div class="input-with-toggle">
+            <input id="ob-token" name="token" type="password" placeholder="Bearer token" autocomplete="off" spellcheck="false" required />
+            <button type="button" id="ob-token-toggle" class="icon-toggle-btn" aria-label="Mostrar ou ocultar a key">
+              <svg id="ob-token-eye" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                <path fill="currentColor" d="M12 5c-5 0-9.27 3.11-11 7 1.73 3.89 6 7 11 7s9.27-3.11 11-7c-1.73-3.89-6-7-11-7zm0 11.5A4.5 4.5 0 1 1 16.5 12 4.5 4.5 0 0 1 12 16.5zm0-7A2.5 2.5 0 1 0 14.5 12 2.5 2.5 0 0 0 12 9.5z"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="ob-model">Versão do agente</label>
+          <select id="ob-model" name="model">
+            <option value="claude-sonnet-5" selected>Claude Sonnet 5</option>
+            <option value="claude-opus-4-8">Claude Opus 4.8</option>
+          </select>
+        </div>
+
+        <button type="submit" id="ob-submit" class="btn-primary">
+          <span class="btn-label">ENTRAR</span>
+          <span class="spinner hidden" id="ob-spinner" aria-hidden="true"></span>
+        </button>
+
+        <div id="ob-status" class="ob-status" role="status" aria-live="polite"></div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- ============================== APP SHELL ============================== -->
+<div class="app hidden" id="app">
+
+  <header class="app-header">
+    <div class="logo-block">
+      <div class="logo">
+        <span class="logo-mbz">MBZ</span><span class="logo-sep">::</span><span class="logo-cortex">CORTEX</span>
+      </div>
+      <div class="tagline">CENTRO DE COMANDO // MBZ MEDIA</div>
+    </div>
+
+    <div class="header-controls">
+      <div class="conn-indicator" id="conn-indicator" title="Status do moodlr-ops">
+        <span class="conn-dot" id="conn-dot"></span>
+        <span class="conn-label" id="conn-label">--</span>
+      </div>
+
+      <label class="visually-hidden" for="model-select">Versão do agente</label>
+      <select id="model-select" class="model-select">
+        <option value="claude-sonnet-5">Claude Sonnet 5</option>
+        <option value="claude-opus-4-8">Claude Opus 4.8</option>
+      </select>
+
+      <button type="button" id="change-config-btn" class="btn-ghost">trocar config</button>
+    </div>
+  </header>
+
+  <!-- Mobile tab bar -->
+  <div class="mobile-tabs" role="tablist" aria-label="Navegação mobile">
+    <button class="mobile-tab active" data-tab="chat" role="tab" aria-selected="true">CHAT</button>
+    <button class="mobile-tab" data-tab="dashboard" role="tab" aria-selected="false">DASHBOARD</button>
+  </div>
+
+  <main class="split-view" id="split-view" data-mobile-tab="chat">
+
+    <!-- ============================== CHAT PANEL ============================== -->
+    <section class="chat-panel" id="panel-chat" aria-label="Chat com o agente">
+      <div class="chat-messages" id="chat-messages" aria-live="polite" aria-relevant="additions"></div>
+
+      <div class="chat-suggestions" id="chat-suggestions">
+        <button type="button" class="chip" data-msg="Resumo de hoje">Resumo de hoje</button>
+        <button type="button" class="chip" data-msg="Conta FB com problema?">Conta FB com problema?</button>
+        <button type="button" class="chip" data-msg="Adsets com fadiga?">Adsets com fadiga?</button>
+        <button type="button" class="chip" data-msg="Melhor hora pra escalar?">Melhor hora pra escalar?</button>
+      </div>
+
+      <form id="chat-form" class="chat-input-bar">
+        <label class="visually-hidden" for="chat-input">Mensagem para o CORTEX</label>
+        <textarea id="chat-input" rows="1" placeholder="Pergunta pra operação..." aria-label="Mensagem"></textarea>
+        <button type="submit" id="chat-send" class="btn-send" aria-label="Enviar mensagem">
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+            <path fill="currentColor" d="M2 21l21-9L2 3v7l15 2-15 2z"/>
+          </svg>
+        </button>
+      </form>
+    </section>
+
+    <!-- ============================== DASHBOARD PANEL ============================== -->
+    <section class="dashboard-panel" id="panel-dashboard" aria-label="Dashboard da operação">
+
+      <div class="dash-toolbar">
+        <div class="period-pills" id="period-pills" role="tablist" aria-label="Período">
+          <button type="button" class="pill active" data-period="hoje" role="tab" aria-selected="true">HOJE</button>
+          <button type="button" class="pill" data-period="ontem" role="tab" aria-selected="false">ONTEM</button>
+          <button type="button" class="pill" data-period="7d" role="tab" aria-selected="false">7D</button>
+        </div>
+        <button type="button" id="refresh-btn" class="btn-refresh">
+          <span class="btn-label">↻ ATUALIZAR</span>
+          <span class="spinner hidden" id="refresh-spinner" aria-hidden="true"></span>
+        </button>
+      </div>
+
+      <div class="dash-meta">
+        <span id="snapshot-age" class="snapshot-age">sem dados</span>
+        <span id="snapshot-error-badge" class="badge-warn hidden" tabindex="0"></span>
+      </div>
+
+      <div class="metric-cards" id="metric-cards">
+        <div class="metric-card" data-metric="receita">
+          <div class="metric-card-top bar-cyan"></div>
+          <div class="metric-label">RECEITA</div>
+          <div class="metric-value" id="metric-receita">—</div>
+        </div>
+        <div class="metric-card" data-metric="gasto">
+          <div class="metric-card-top bar-pink"></div>
+          <div class="metric-label">GASTO</div>
+          <div class="metric-value" id="metric-gasto">—</div>
+        </div>
+        <div class="metric-card" data-metric="lucro">
+          <div class="metric-card-top bar-purple"></div>
+          <div class="metric-label">LUCRO</div>
+          <div class="metric-value" id="metric-lucro">—</div>
+        </div>
+        <div class="metric-card" data-metric="roi">
+          <div class="metric-card-top bar-green"></div>
+          <div class="metric-label">ROI</div>
+          <div class="metric-value" id="metric-roi">—</div>
+        </div>
+      </div>
+      <div id="metric-note" class="metric-note hidden"></div>
+
+      <div class="dash-section">
+        <h2 class="section-title">BLOGS <span class="dim">// por lucro</span></h2>
+        <div class="table-wrap">
+          <table id="blogs-table">
+            <thead>
+              <tr>
+                <th>Nome</th><th>Receita</th><th>Gasto</th><th>eCPM</th><th>Lucro</th><th>ROI</th>
+              </tr>
+            </thead>
+            <tbody id="blogs-tbody">
+              <tr class="empty-row"><td colspan="6">sem dados ainda</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="dash-section alerts-section" id="alerts-section">
+        <h2 class="section-title">ALERTAS <span class="alerts-count" id="alerts-count"></span></h2>
+        <div id="alerts-body" class="alerts-body">
+          <div class="alerts-empty">// aguardando dados</div>
+        </div>
+      </div>
+
+    </section>
+  </main>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
