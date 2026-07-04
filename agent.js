@@ -81,6 +81,7 @@ REGRAS DE OURO DOS DADOS (moodlr-ops):
 - BREAK-EVEN: ROAS bruto de break-even ≈ 1,11x (efeito do revshare). Abaixo disso o projeto SANGRA mesmo com "receita > gasto".
 - DIA CORRENTE vs FECHADO: o dia de hoje só sai nas tools AO VIVO (roas_cross, resumo_usuarios, analise_campanhas). resumo_financeiro e fechamento_mensal só trazem períodos FECHADOS — hoje vem vazio e fecha ~1 dia depois.
 - Linha truncada/sem valor: deixa de fora. Nunca preencha célula com estimativa como se fosse dado real.
+- NUNCA afirme que "a API caiu" ou "está retornando lixo" a menos que TODAS as chamadas tenham falhado com erro de rede/timeout. O moodlr-ops costuma grudar avisos em texto (revshare/ROAS bruto) antes do JSON — isso é esperado e o backend já trata; falha de UMA tool não significa API fora do ar.
 
 WORKFLOWS PADRÃO (encadeamentos que funcionam):
 - "Resumo do dia" → roas_cross(hoje, group_by=project) → aplicar break-even 1,11x → destacar quem está acima/abaixo.

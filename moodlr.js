@@ -326,8 +326,60 @@ async function rpcWithSessionFallback(method, params, moodlrToken, opts = {}) {
 // ──────────────────── desembrulho do resultado da tool ────────────────────
 function extractText(content) {
   if (!Array.isArray(content)) return '';
-  const block = content.find((c) => c && c.type === 'text' && typeof c.text === 'string');
-  return block ? block.text : '';
+  // Concatena TODOS os blocos de texto — o payload pode vir dividido em vários.
+  return content
+    .filter((c) => c && c.type === 'text' && typeof c.text === 'string')
+    .map((c) => c.text)
+    .join('\n');
+}
+
+/**
+ * Extrai o payload JSON de um texto que pode vir com preâmbulo E/OU sufixo em
+ * texto puro — o moodlr-ops gruda avisos tipo "ATENÇÃO (ROAS bruto)..." ou
+ * "COMO LER O DINHEIRO (revshare)..." antes do JSON. Exportada para testes.
+ * @returns o valor parseado, ou undefined se não houver JSON balanceado.
+ */
+export function extractJsonPayload(raw) {
+  const text = String(raw ?? '').trim();
+  if (!text) return undefined;
+
+  // Caminho feliz: o texto inteiro é JSON.
+  try {
+    return JSON.parse(text);
+  } catch {
+    /* segue pro scan */
+  }
+
+  // Localiza cada '{' ou '[' candidato e varre até o fechamento correspondente,
+  // ignorando chaves/colchetes dentro de strings (com consciência de escapes).
+  for (let start = 0; start < text.length; start++) {
+    const open = text[start];
+    if (open !== '{' && open !== '[') continue;
+    const close = open === '{' ? '}' : ']';
+    let depth = 0;
+    let inString = false;
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i];
+      if (inString) {
+        if (ch === '\\') { i++; continue; }
+        if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') { inString = true; continue; }
+      if (ch === open) depth++;
+      else if (ch === close) {
+        depth--;
+        if (depth === 0) {
+          try {
+            return JSON.parse(text.slice(start, i + 1));
+          } catch {
+            break; // candidato desbalanceado/inválido — tenta o próximo abridor
+          }
+        }
+      }
+    }
+  }
+  return undefined;
 }
 
 function unwrapToolResult(result, toolName) {
@@ -342,11 +394,11 @@ function unwrapToolResult(result, toolName) {
   }
   const text = extractText(result.content);
   if (text) {
-    try {
-      return JSON.parse(text); // normalmente { status, data, cache }
-    } catch {
-      throw new McpProtocolError(`Ferramenta ${toolName} retornou texto não-JSON.`);
-    }
+    const parsed = extractJsonPayload(text); // normalmente { status, data, cache }
+    if (parsed !== undefined) return parsed;
+    throw new McpProtocolError(
+      `Ferramenta ${toolName}: nenhum JSON balanceado no texto retornado — erro de parsing DESTA tool, não indica API fora do ar. Início do texto: "${text.slice(0, 180)}"`,
+    );
   }
   if (result.structuredContent !== undefined) return result.structuredContent;
   throw new McpProtocolError(`Ferramenta ${toolName} não retornou texto JSON.`);
