@@ -33,7 +33,18 @@ const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504, 529]);
 // re-executar uma query pesada que estourou só empilha carga no moodlr-ops.
 const HEAVY_TOOL_OPTS = {
   resumo_usuarios: { timeoutMs: 90_000, maxAttempts: 2 },
+  analise_campanhas: { timeoutMs: 60_000, maxAttempts: 2 },
 };
+
+// O moodlr-ops carrega as tools sob demanda (lazy load): sem um tool_search
+// prévio, tools/call pode falhar com "not loaded". Estas 4 buscas carregam
+// todos os grupos de tools (guia operacional do moodlr-ops).
+const LAZY_LOAD_KEYWORDS = [
+  'resumo financeiro',
+  'campanhas fadiga contas',
+  'listar projetos redirects',
+  'writing sequencia analise',
+];
 
 // Lidas de forma preguiçosa para não depender da ordem de import do dotenv.
 const mcpUrl = () => process.env.MOODLR_MCP_URL || DEFAULT_MCP_URL;
@@ -204,6 +215,11 @@ function mapJsonRpcError(error) {
   return new McpToolError(msg);
 }
 
+function looksLikeNotLoadedError(err) {
+  if (!(err instanceof MoodlrError)) return false;
+  return /not\s*loaded|n[aã]o\s*(foi\s*)?carregad|tool_search/i.test(err.message || '');
+}
+
 function looksLikeSessionError(err) {
   if (err instanceof McpSessionError) return true;
   if (err instanceof McpHttpError && err.status === 400) {
@@ -345,8 +361,22 @@ export async function callTool(toolName, args, moodlrToken) {
   if (!moodlrToken) throw new McpAuthError('Token do moodlr-ops ausente.', 401);
   const params = { name: toolName, arguments: injectCompany(args) };
   const opts = HEAVY_TOOL_OPTS[toolName] || {};
-  const { result } = await rpcWithSessionFallback('tools/call', params, moodlrToken, opts);
-  return unwrapToolResult(result, toolName);
+  try {
+    const { result } = await rpcWithSessionFallback('tools/call', params, moodlrToken, opts);
+    return unwrapToolResult(result, toolName);
+  } catch (err) {
+    if (!looksLikeNotLoadedError(err)) throw err;
+    // Lazy load do servidor: destrava com tool_search pelas palavras-chave dos
+    // grupos e repete a chamada UMA vez, no mesmo ciclo (mesma sessão, se houver).
+    const sessionId = await initializeSession(moodlrToken).catch(() => null);
+    for (const kw of LAZY_LOAD_KEYWORDS) {
+      try {
+        await rpcRequest('tools/call', { name: 'tool_search', arguments: { query: kw } }, moodlrToken, sessionId);
+      } catch { /* best-effort: se a busca falhar, a retentativa abaixo decide */ }
+    }
+    const { result } = await rpcRequest('tools/call', params, moodlrToken, sessionId, opts);
+    return unwrapToolResult(result, toolName);
+  }
 }
 
 /**
