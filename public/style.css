@@ -5,7 +5,7 @@
 
 /* ---------- 1. RESET & VARIABLES ---------- */
 *, *::before, *::after { box-sizing: border-box; }
-html, body { height: 100%; }
+html, body { height: 100%; overflow: hidden; }
 
 :root {
   --bg: #04050a;
@@ -39,8 +39,7 @@ body {
   font-family: var(--font-mono);
   font-size: 14px;
   line-height: 1.5;
-  overflow-x: hidden;
-  min-height: 100vh;
+  overflow: hidden;
 }
 
 .hidden { display: none !important; }
@@ -289,9 +288,12 @@ select { cursor: pointer; }
 .app {
   position: relative;
   z-index: 1;
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh; /* dynamic viewport height on mobile - accounts for browser chrome */
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden; /* the app never scrolls as a whole - each split-view column scrolls internally */
 }
 
 .app-header {
@@ -767,10 +769,22 @@ tbody tr.empty-row td { color: var(--text-dim); text-align: center; padding: 18p
 .pill-value.neutral { background: rgba(90, 114, 153, 0.15); color: var(--text-dim); }
 
 /* alerts */
-.alerts-section { position: relative; transition: box-shadow 0.3s ease, border-color 0.3s ease; }
+.alerts-section {
+  position: relative;
+  transition: box-shadow 0.3s ease, border-color 0.3s ease;
+  display: flex;
+  flex-direction: column;
+  max-height: 40vh; /* ~40% of the viewport-capped app - alerts never dominate the dashboard */
+  min-height: 0;
+}
 .alerts-section.has-alerts {
   border-color: rgba(255, 59, 92, 0.5);
   animation: alert-pulse 1.6s ease-in-out infinite;
+}
+.alerts-body {
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
 }
 @keyframes alert-pulse {
   0%, 100% { box-shadow: 0 0 6px rgba(255, 59, 92, 0.25); }
@@ -807,6 +821,13 @@ tbody tr.empty-row td { color: var(--text-dim); text-align: center; padding: 18p
 .alert-item .alert-field { color: var(--text-dim); margin-right: 6px; }
 .alert-item .alert-field::after { content: ':'; }
 .alert-item span.alert-kv { margin-right: 12px; display: inline-block; }
+
+.alert-more {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  padding: 6px 4px 2px;
+  text-align: center;
+}
 
 /* ---------- 11. RESPONSIVE ---------- */
 @media (max-width: 900px) {

@@ -874,28 +874,43 @@
     });
   }
 
+  var ALERT_MAX_FIELDS = 4;
+  var ALERTS_MAX_PER_SOURCE = 12;
+
   function describeAlertItem(item) {
     if (item === null || item === undefined) return '';
     if (typeof item !== 'object') return escapeHtml(String(item));
 
-    var fields = [
-      ['nome', pick(item, ['nome', 'blog', 'name', 'conta', 'account', 'account_name'])],
-      ['status', pick(item, ['status', 'estado'])],
-      ['motivo', pick(item, ['motivo', 'reason', 'issue', 'problema'])],
-      ['score', pick(item, ['score', 'severidade'])],
-      ['pais', pick(item, ['country', 'pais'])],
-      ['roi', pick(item, ['roi', 'roi_liquido', 'net_roi'])]
+    // Prioridade: status/pais continuam sempre presentes quando existirem;
+    // nome/adset/campanha/blog/score preenchem os slots restantes ate o cap
+    // de ALERT_MAX_FIELDS por item (card nao pode virar uma parede de texto).
+    var fieldDefs = [
+      ['status', ['status', 'estado']],
+      ['pais', ['country', 'pais']],
+      ['nome', ['nome', 'name', 'conta', 'account', 'account_name']],
+      ['adset', ['adset', 'adset_name', 'ad_set']],
+      ['campanha', ['campanha', 'campaign', 'campaign_name']],
+      ['blog', ['blog', 'blog_nome', 'site']],
+      ['score', ['score', 'severidade']],
+      ['motivo', ['motivo', 'reason', 'issue', 'problema']],
+      ['roi', ['roi', 'roi_liquido', 'net_roi']]
     ];
 
+    var found = [];
+    for (var i = 0; i < fieldDefs.length && found.length < ALERT_MAX_FIELDS; i++) {
+      var val = pick(item, fieldDefs[i][1]);
+      if (val === undefined || val === null || val === '') continue;
+      found.push([fieldDefs[i][0], val]);
+    }
+
     var html = '';
-    fields.forEach(function (f) {
-      if (f[1] === undefined || f[1] === null || f[1] === '') return;
+    found.forEach(function (f) {
       html += '<span class="alert-kv"><span class="alert-field">' + escapeHtml(f[0]) + '</span>' + escapeHtml(String(f[1])) + '</span>';
     });
 
     if (!html) {
       // fallback: dump whatever primitive-ish keys exist
-      var keys = Object.keys(item).slice(0, 4);
+      var keys = Object.keys(item).slice(0, ALERT_MAX_FIELDS);
       keys.forEach(function (k) {
         var v = item[k];
         if (v === null || v === undefined || typeof v === 'object') return;
@@ -909,9 +924,14 @@
   function renderAlertGroup(title, items) {
     if (!items.length) return '';
     var html = '<div class="alert-source-title">' + escapeHtml(title) + ' (' + items.length + ')</div>';
-    items.forEach(function (item) {
+    var shown = items.slice(0, ALERTS_MAX_PER_SOURCE);
+    shown.forEach(function (item) {
       html += '<div class="alert-item">' + describeAlertItem(item) + '</div>';
     });
+    var extra = items.length - shown.length;
+    if (extra > 0) {
+      html += '<div class="alert-more">+ ' + extra + ' alertas — pergunte ao agente pra priorizar</div>';
+    }
     return html;
   }
 

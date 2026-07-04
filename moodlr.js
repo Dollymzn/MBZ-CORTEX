@@ -29,6 +29,12 @@ const MAX_DELAY_MS = 8_000;
 // transientes e merecem retry. Ver DESIGN.md → "Retry / backoff".
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504, 529]);
 
+// Tools analíticas pesadas: mais tempo por tentativa e MENOS retries —
+// re-executar uma query pesada que estourou só empilha carga no moodlr-ops.
+const HEAVY_TOOL_OPTS = {
+  resumo_usuarios: { timeoutMs: 90_000, maxAttempts: 2 },
+};
+
 // Lidas de forma preguiçosa para não depender da ordem de import do dotenv.
 const mcpUrl = () => process.env.MOODLR_MCP_URL || DEFAULT_MCP_URL;
 const company = () => (process.env.MOODLR_COMPANY || '').trim();
@@ -128,7 +134,7 @@ function injectCompany(args) {
 
 function mapNetworkError(err) {
   if (err && (err.name === 'AbortError' || err.name === 'TimeoutError')) {
-    return new McpTimeoutError(`Tempo esgotado ao contatar o moodlr-ops (>${TIMEOUT_MS / 1000}s).`);
+    return new McpTimeoutError('Tempo esgotado ao contatar o moodlr-ops.');
   }
   return new McpNetworkError(`Falha de rede ao contatar o moodlr-ops: ${err?.message || 'erro desconhecido'}.`);
 }
@@ -207,9 +213,9 @@ function looksLikeSessionError(err) {
 }
 
 // ─────────────────────────── camada de transporte ────────────────────────
-async function postOnce(body, moodlrToken, sessionId) {
+async function postOnce(body, moodlrToken, sessionId, timeoutMs = TIMEOUT_MS) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(mcpUrl(), {
       method: 'POST',
@@ -225,14 +231,15 @@ async function postOnce(body, moodlrToken, sessionId) {
 }
 
 /** POST com retry/backoff. Fecha a conexão a cada tentativa (fetch é one-shot). */
-async function postWithRetry(body, moodlrToken, sessionId) {
+async function postWithRetry(body, moodlrToken, sessionId, opts = {}) {
+  const maxAttempts = opts.maxAttempts || MAX_ATTEMPTS;
   let lastErr;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     if (attempt > 1) await sleep(backoffDelay(attempt - 1));
 
     let out;
     try {
-      out = await postOnce(body, moodlrToken, sessionId);
+      out = await postOnce(body, moodlrToken, sessionId, opts.timeoutMs);
     } catch (err) {
       lastErr = mapNetworkError(err); // rede/timeout → retentável
       continue;
@@ -255,9 +262,9 @@ async function postWithRetry(body, moodlrToken, sessionId) {
 }
 
 /** Uma requisição JSON-RPC completa (com id). Retorna { result, sessionId }. */
-async function rpcRequest(method, params, moodlrToken, sessionId) {
+async function rpcRequest(method, params, moodlrToken, sessionId, opts = {}) {
   const id = nextId();
-  const { res, text } = await postWithRetry({ jsonrpc: '2.0', id, method, params }, moodlrToken, sessionId);
+  const { res, text } = await postWithRetry({ jsonrpc: '2.0', id, method, params }, moodlrToken, sessionId, opts);
   const returnedSession = res.headers.get('mcp-session-id') || sessionId || null;
   const messages = parseRpcBody(text, res.headers.get('content-type'));
   const msg = pickResponse(messages, id);
@@ -288,13 +295,13 @@ async function initializeSession(moodlrToken) {
 }
 
 /** Executa method com fallback de initialize se o servidor exigir sessão. */
-async function rpcWithSessionFallback(method, params, moodlrToken) {
+async function rpcWithSessionFallback(method, params, moodlrToken, opts = {}) {
   try {
-    return await rpcRequest(method, params, moodlrToken, null);
+    return await rpcRequest(method, params, moodlrToken, null, opts);
   } catch (err) {
     if (looksLikeSessionError(err)) {
       const sessionId = await initializeSession(moodlrToken);
-      return await rpcRequest(method, params, moodlrToken, sessionId);
+      return await rpcRequest(method, params, moodlrToken, sessionId, opts);
     }
     throw err;
   }
@@ -337,7 +344,8 @@ function unwrapToolResult(result, toolName) {
 export async function callTool(toolName, args, moodlrToken) {
   if (!moodlrToken) throw new McpAuthError('Token do moodlr-ops ausente.', 401);
   const params = { name: toolName, arguments: injectCompany(args) };
-  const { result } = await rpcWithSessionFallback('tools/call', params, moodlrToken);
+  const opts = HEAVY_TOOL_OPTS[toolName] || {};
+  const { result } = await rpcWithSessionFallback('tools/call', params, moodlrToken, opts);
   return unwrapToolResult(result, toolName);
 }
 
