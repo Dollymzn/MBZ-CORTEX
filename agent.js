@@ -1,11 +1,19 @@
 // agent.js — Loop de tool use multi-turn do CORTEX + streaming SSE (backend→browser).
 //
-// runAgentStream({ res, messages, managerName, moodlrToken, model, snapshot }):
-//   - Chama a Anthropic Messages API com streaming e as 16 ferramentas do moodlr-ops.
+// runAgentStream({ res, messages, managerName, moodlrToken, model, snapshot,
+//                  rulerToken, avBearer, signal }):
+//   - Chama a Anthropic Messages API com streaming e as ferramentas dos DOIS MCPs:
+//     sempre as do moodlr-ops (compra); e as do ruler-mcp (venda/price floors) SÓ
+//     quando o gestor tem rulerToken configurado.
 //   - Enquanto stop_reason === "tool_use": executa TODAS as tools da rodada em
-//     paralelo (via moodlr.callTool, injetando o token do gestor), devolve os
-//     tool_result num ÚNICO user message e continua. Máx. 8 rodadas.
+//     paralelo, roteando por nome (RULER_TOOL_NAMES → ruler; senão → moodlr),
+//     devolve os tool_result num ÚNICO user message e continua. Máx. 8 rodadas.
 //   - Emite eventos SSE do contrato: delta / tool / done / error.
+//
+// TRAVA DE DINHEIRO (aplicar_floor): a aplicação de floors mexe em receita real.
+// Há uma guarda SERVER-SIDE, à prova de prompt injection (é código, não prompt):
+// confirm=true só passa se houve um PREVIEW recente (sem confirm) do mesmo
+// network+domain, para o MESMO gestor (chaveado por hash SHA-256 do rulerToken).
 //
 // IMPORTANTE (Messages API):
 //   - IDs de modelo exatos: "claude-sonnet-5" | "claude-opus-4-8" (sem sufixo).
@@ -13,9 +21,13 @@
 //   - Streaming: client.messages.stream({...}); deltas via stream.on("text");
 //     ao final const msg = await stream.finalMessage().
 
+import { createHash } from 'node:crypto';
 import Anthropic from '@anthropic-ai/sdk';
 import { TOOLS } from './tools.js';
+import { RULER_TOOLS, RULER_TOOL_NAMES } from './tools-ruler.js';
 import { callTool, McpAuthError, McpTimeoutError, McpNetworkError } from './moodlr.js';
+import { callRulerTool } from './ruler.js';
+import { McpToolError } from './mcp-core.js';
 
 const MAX_ROUNDS = 8;
 const MAX_TOKENS = 8192;
@@ -56,10 +68,72 @@ function snapshotAgeMinutes(snapshot) {
   return Math.max(0, Math.round((Date.now() - ts) / 60_000));
 }
 
+// ═══════════════════════ TRAVA DO APLICAR_FLOOR (server-side) ══════════════
+// Registro de previews em memória. Chaveado pelo HASH SHA-256 do rulerToken —
+// NUNCA o token cru. Guarda o último preview {network, domain, ts} por gestor.
+// TTL 15 min + cap de tamanho (não cresce sem limite). Como é código, o modelo
+// não tem como pular a guarda por prompt injection.
+const PREVIEW_TTL_MS = 15 * 60 * 1000;
+const PREVIEW_CAP = 500; // nº máx. de gestores distintos rastreados simultaneamente
+const previewRegistry = new Map(); // hash(rulerToken) -> { network, domain, ts }
+
+function tokenHash(token) {
+  return createHash('sha256').update(String(token ?? '')).digest('hex');
+}
+
+// Normaliza network/domain para comparação robusta (o modelo pode variar
+// caixa/espacos entre o preview e o confirm).
+function normKey(s) {
+  return String(s ?? '').trim().toLowerCase();
+}
+
+function prunePreviews(now = Date.now()) {
+  for (const [k, v] of previewRegistry) {
+    if (now - v.ts > PREVIEW_TTL_MS) previewRegistry.delete(k);
+  }
+  if (previewRegistry.size > PREVIEW_CAP) {
+    // Descarta os mais antigos até voltar ao teto.
+    const oldestFirst = [...previewRegistry.entries()].sort((a, b) => a[1].ts - b[1].ts);
+    for (let i = 0; i < oldestFirst.length - PREVIEW_CAP; i++) {
+      previewRegistry.delete(oldestFirst[i][0]);
+    }
+  }
+}
+
+function registerPreview(rulerToken, network, domain) {
+  previewRegistry.set(tokenHash(rulerToken), {
+    network: normKey(network),
+    domain: normKey(domain),
+    ts: Date.now(),
+  });
+  // Poda DEPOIS de inserir → garante a pós-condição size <= PREVIEW_CAP a cada
+  // registro (podar antes deixaria o Map estabilizar em CAP+1).
+  prunePreviews();
+}
+
+function hasValidPreview(rulerToken, network, domain) {
+  const key = tokenHash(rulerToken);
+  const rec = previewRegistry.get(key);
+  if (!rec) return false;
+  if (Date.now() - rec.ts > PREVIEW_TTL_MS) {
+    previewRegistry.delete(key);
+    return false;
+  }
+  return rec.network === normKey(network) && rec.domain === normKey(domain);
+}
+
+function consumePreview(rulerToken) {
+  previewRegistry.delete(tokenHash(rulerToken));
+}
+
 // ─────────────────────────── system prompt ───────────────────────────────
-// Bloco ESTÁVEL (persona + regras). É igual byte-a-byte para
-// TODOS os gestores e TODAS as requisições → é o que colocamos no cache de prompt.
-// Nada de nome do gestor, data ou snapshot aqui (isso invalidaria o cache).
+// Bloco ESTÁVEL (persona + regras). É igual byte-a-byte para TODOS os gestores e
+// TODAS as requisições → é o que colocamos no cache de prompt. Nada de nome do
+// gestor, data ou snapshot aqui (isso invalidaria o cache). O bloco de floors
+// TAMBÉM é estável: descreve as tools de venda para todo mundo, mas instrui o
+// modelo a só USÁ-LAS/MENCIONÁ-LAS quando elas aparecerem na lista de tools (ou
+// seja, quando o gestor configurou a key do ruler). Assim mantemos UM único
+// prefixo cacheável, e a disponibilidade real é decidida pela lista `tools`.
 const STABLE_SYSTEM = `Você é o CORTEX, braço direito operacional da Moodlr LLC — o cérebro central da operação de tráfego e arbitragem de display.
 
 ESTILO: português do Brasil, direto e informal, pegada cyberpunk/hacker sem exagero. Fala como um trafficker experiente que vive de mídia paga (Facebook Ads, Google Ads), arbitragem de display (AdX/AdSense) e monetização de blog. Chama o gestor pelo nome.
@@ -89,7 +163,26 @@ WORKFLOWS PADRÃO (encadeamentos que funcionam):
 - "Projeto ruim, corto?" → sequencia_dias(id) pra separar dia ruim de projeto quebrado → se streak negativo longo, analise_campanhas(id, hoje) pra achar adsets zumbi (idade alta, receita zero) → fadiga_criativo(id) pra ver se é criativo cansado.
 - "Fechamento real de ontem" → resumo_financeiro(ontem, ontem) → usar net_profit/roi_percentage (líquidos).
 - "Onde/quando escalar" → yield_por_hora(id, pivot=day) → best_hour.
-- "Conta com problema?" → saude_contas_fb (total_alerts 0 = tudo ok).`;
+- "Conta com problema?" → saude_contas_fb (total_alerts 0 = tudo ok).
+
+━━━━━━━━ PRICE FLOORS — LADO DA VENDA (ruler-mcp / ActiveView) ━━━━━━━━
+Enquanto o moodlr-ops é o lado da COMPRA (quanto você paga em mídia), o ruler-mcp é o lado da VENDA: o piso de preço (floor) que a ActiveView usa nos leilões de display. Tools: resumo_floors, listar_price_rules, sugerir_floor, historico_ajustes, aplicar_floor.
+
+DISPONIBILIDADE: essas tools SÓ existem se o gestor configurou as chaves do ruler (key do ruler-mcp + bearer da ActiveView). Se você NÃO vê as tools de floor na sua lista de ferramentas, elas não estão disponíveis para este gestor — NÃO as mencione como opção nem prometa usá-las; no máximo diga que dá pra habilitar o módulo de floors na config.
+
+SEM DESCOBERTA AUTOMÁTICA: não existe "listar domínios/networks" — network e domain são informados pelo GESTOR. Se ele pedir algo de floor sem dizer qual network/domínio, PERGUNTE antes de chamar qualquer tool.
+
+⚠️ REGRA DE OURO DOS FLOORS: aplicar_floor faz upsert REAL na ActiveView — mexe em RECEITA de verdade. NUNCA aplique sem aprovação. O fluxo é sagrado: (1) rode aplicar_floor SEM confirm para gerar um PREVIEW; (2) mostre ao gestor o antes→depois REGRA POR REGRA (floor atual → novo); (3) só confirme (confirm=true) após aprovação EXPLÍCITA dele na conversa. O backend reforça isso: confirm=true sem um preview recente do mesmo network+domain é BLOQUEADO — não tente "pular" o preview.
+
+FLUXO RECOMENDADO DE CALIBRAÇÃO:
+1. resumo_floors(network, domain) → panorama + regras problemáticas.
+2. listar_price_rules(network, domain) → detalhe regra a regra (match_rate vs desired, eCPM, floor atual).
+3. CRUZE com o lado da COMPRA (moodlr-ops): roas_cross / analise_campanhas / fadiga_criativo do mesmo projeto.
+4. sugerir_floor(network, domain) → sugestões SUBIR/DESCER (não aplica).
+5. aplicar_floor SEM confirm (preview) → aprovação do gestor → aplicar_floor confirm=true.
+6. historico_ajustes(domain) depois → medir o efeito do ajuste.
+
+CROSS-ANALYSIS COMPRA × VENDA (o pulo do gato): quando o eCPM de um projeto cai, a causa pode estar nos DOIS lados — é fadiga de criativo (COMPRA: fadiga_criativo / analise_campanhas) OU floor mal calibrado (VENDA: listar_price_rules / resumo_floors)? Use os dois MCPs para separar. Leitura de floor: match_rate MUITO abaixo do desired_match_rate = floor ALTO demais (está recusando impressão e perdendo volume); match_rate colado no teto com eCPM baixo = floor BAIXO demais (está vendendo barato, queimando yield). Recomende subir/descer com base nesse trade-off, sempre confrontando com o ROI do lado da compra.`;
 
 function sanitizeManagerName(name) {
   const clean = String(name || 'gestor').replace(/[\r\n]+/g, ' ').trim();
@@ -128,7 +221,7 @@ ${snapJson}`;
 
 /**
  * Monta o system como array de 2 blocos:
- *  [0] ESTÁVEL, com cache_control ephemeral → prefixo cacheável (tools+persona+mapa).
+ *  [0] ESTÁVEL, com cache_control ephemeral → prefixo cacheável (persona+regras+floors).
  *  [1] VOLÁTIL (nome, data, snapshot) → depois do breakpoint, não invalida o cache.
  * Ver DESIGN.md → "Snapshot no system prompt e prompt cache".
  */
@@ -167,16 +260,86 @@ function friendlyError(err) {
   return 'Deu um problema aqui no CORTEX. Tenta reformular ou repetir a pergunta.';
 }
 
+// ──────────────────── execução/roteamento de uma tool ─────────────────────
+/**
+ * Aplica a TRAVA server-side do aplicar_floor. Retorna o payload da tool.
+ * Lança McpToolError (vira tool_result is_error) quando a guarda barra a operação.
+ */
+async function applyFloorGuarded(input, ctx) {
+  const network = input?.network;
+  const domain = input?.domain;
+  // Fail-safe: SÓ o booleano `true` conta como confirmação. String "true",
+  // 1, "1", {} etc. caem no caminho de PREVIEW (nunca aplicam por engano).
+  const wantsConfirm = input?.confirm === true;
+
+  // Permite injetar o transporte no teste; em produção usa o callRulerTool real.
+  const callRuler = ctx.callRuler || callRulerTool;
+
+  // O modelo nunca deve injetar `actor` — é o backend que define quem aprovou.
+  const base = { ...(input || {}) };
+  delete base.actor;
+
+  if (!wantsConfirm) {
+    // PREVIEW: roda sem confirm (o servidor devolve o preview, não aplica) e
+    // REGISTRA o preview para destravar um confirm subsequente.
+    const args = { ...base, confirm: false };
+    const data = await callRuler('aplicar_floor', args, ctx.rulerToken, ctx.avBearer);
+    registerPreview(ctx.rulerToken, network, domain);
+    return data;
+  }
+
+  // CONFIRM: só passa com preview recente do mesmo gestor + network + domain.
+  if (!hasValidPreview(ctx.rulerToken, network, domain)) {
+    throw new McpToolError(
+      'TRAVA DE SEGURANÇA: aplicar_floor com confirm=true foi BLOQUEADO — não há um preview recente ' +
+        '(últimos 15 min) para este network+domain neste gestor. Rode aplicar_floor SEM confirm primeiro, ' +
+        'mostre o antes→depois ao gestor, colha a aprovação explícita e só então confirme. ' +
+        'Não há como pular esta etapa.',
+    );
+  }
+  const args = { ...base, confirm: true, actor: sanitizeManagerName(ctx.managerName) };
+  const data = await callRuler('aplicar_floor', args, ctx.rulerToken, ctx.avBearer);
+  consumePreview(ctx.rulerToken); // one-shot: um preview autoriza UMA aplicação
+  return data;
+}
+
+// Exportado APENAS para testes da trava (não usar em produção).
+export const __floorGuardTestApi = { applyFloorGuarded, previewRegistry, PREVIEW_TTL_MS };
+
+/** Roteia a execução de UMA tool para o MCP certo, aplicando as guardas do ruler. */
+async function executeTool(name, input, ctx) {
+  if (RULER_TOOL_NAMES.has(name)) {
+    // Guarda de configuração: o modelo pode ter as tools de floor na lista (elas
+    // só entram quando há rulerToken), mas por segurança confirmamos aqui também.
+    if (!ctx.rulerToken) {
+      throw new McpToolError(
+        'As ferramentas de price floor exigem as chaves do ruler-mcp configuradas (key do ruler-mcp + ' +
+          'bearer da ActiveView). Peça ao gestor para habilitar o módulo de floors em "trocar config".',
+      );
+    }
+    if (name === 'aplicar_floor') return applyFloorGuarded(input, ctx);
+    return callRulerTool(name, input, ctx.rulerToken, ctx.avBearer);
+  }
+  // Default: moodlr-ops (comportamento inalterado).
+  return callTool(name, input, ctx.moodlrToken);
+}
+
 // ──────────────────────────── loop principal ─────────────────────────────
 /**
  * Roda o agente e faz streaming SSE para `res`. Escreve os eventos do contrato
  * (delta/tool/done/error) e ENCERRA a conexão ao final.
  */
-export async function runAgentStream({ res, messages, managerName, moodlrToken, model, snapshot, signal }) {
+export async function runAgentStream({ res, messages, managerName, moodlrToken, model, snapshot, rulerToken, avBearer, signal }) {
   const chosenModel = VALID_MODELS.has(model) ? model : 'claude-sonnet-5';
   const client = getClient();
   const system = buildSystem(managerName, snapshot);
   const convo = normalizeMessages(messages);
+
+  // As tools de floor só entram na lista quando o gestor configurou o ruler.
+  const tools = rulerToken ? [...TOOLS, ...RULER_TOOLS] : TOOLS;
+
+  // Contexto de execução repassado a cada tool (tokens NUNCA são logados).
+  const ctx = { moodlrToken, rulerToken, avBearer, managerName };
 
   let finalStop = null;
   let hitCap = true;
@@ -198,7 +361,7 @@ export async function runAgentStream({ res, messages, managerName, moodlrToken, 
           max_tokens: MAX_TOKENS,
           system,
           messages: convo,
-          tools: TOOLS,
+          tools,
         },
         { signal },
       );
@@ -228,12 +391,13 @@ export async function runAgentStream({ res, messages, managerName, moodlrToken, 
       }
 
       // Executa TODAS as tools da rodada em paralelo. Erro de tool NÃO derruba o
-      // chat: vira tool_result com is_error e o agente segue.
+      // chat: vira tool_result com is_error e o agente segue. O roteamento
+      // (moodlr vs ruler) e as guardas de floor ficam em executeTool.
       const toolResults = await Promise.all(
         toolUses.map(async (tu) => {
           sse(res, 'tool', { name: tu.name, status: 'start' });
           try {
-            const data = await callTool(tu.name, tu.input || {}, moodlrToken);
+            const data = await executeTool(tu.name, tu.input || {}, ctx);
             sse(res, 'tool', { name: tu.name, status: 'end', ok: true });
             return { type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(data) };
           } catch (err) {
@@ -264,7 +428,7 @@ export async function runAgentStream({ res, messages, managerName, moodlrToken, 
     // Cliente abortou: não há mais ninguém para receber eventos.
     if (signal?.aborted) return;
     // Erros de tool já são tratados dentro do loop; aqui caem erros da Anthropic
-    // API ou falhas inesperadas. Nunca vaza a ANTHROPIC_API_KEY nem o token.
+    // API ou falhas inesperadas. Nunca vaza a ANTHROPIC_API_KEY nem os tokens.
     sse(res, 'error', { message: friendlyError(err) });
   } finally {
     if (!res.writableEnded) res.end();

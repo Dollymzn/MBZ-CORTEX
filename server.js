@@ -1,16 +1,21 @@
 // server.js — MBZ::CORTEX backend. Express + rotas + static + dotenv.
 //
 // Contrato de API (CONGELADO — o frontend é construído contra isto):
-//   GET  /api/health   -> 200 {"ok":true}
-//   POST /api/validate -> {moodlrToken} -> 200 {ok,toolCount} | 401 | 502
-//   POST /api/snapshot -> {moodlrToken, period} -> 200 {ok,snapshot} | 502
-//   POST /api/chat     -> {messages,managerName,moodlrToken,model,snapshot} -> SSE
+//   GET  /api/health         -> 200 {"ok":true}
+//   POST /api/validate       -> {moodlrToken} -> 200 {ok,toolCount} | 401 | 502
+//   POST /api/validate-ruler -> {rulerToken}  -> 200 {ok,toolCount} | 401 | 502
+//   POST /api/snapshot       -> {moodlrToken, period} -> 200 {ok,snapshot} | 502
+//   POST /api/chat           -> {messages,managerName,moodlrToken,model,snapshot,rulerToken?,avBearer?} -> SSE
 //
 // Segurança: ANTHROPIC_API_KEY fica só no servidor (nunca vai ao frontend nem a
-// logs). O token do moodlr-ops do gestor vem em cada request e NUNCA é logado.
+// logs). Os tokens do gestor (moodlr-ops, ruler-mcp) e o av_bearer da ActiveView
+// vêm em cada request e NUNCA são logados.
 //
-// Layout de deploy: este arquivo (e moodlr.js/tools.js/agent.js) roda na RAIZ do
-// repo, ao lado da pasta public/ (frontend estático). Ver DESIGN.md.
+// O ruler-mcp (price floors, lado da venda) NÃO entra no snapshot: floors são
+// consultados sob demanda pelo agente. O snapshot segue idêntico (só moodlr-ops).
+//
+// Layout de deploy: este arquivo (e mcp-core.js/moodlr.js/ruler.js/tools*.js/
+// agent.js) roda na RAIZ do repo, ao lado da pasta public/. Ver DESIGN.md.
 
 import 'dotenv/config';
 import express from 'express';
@@ -18,6 +23,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { listTools, callTool, McpAuthError } from './moodlr.js';
+import { listRulerTools } from './ruler.js';
 import { runAgentStream } from './agent.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -82,8 +88,26 @@ app.post('/api/validate', async (req, res) => {
   }
 });
 
+// Valida a chave do gestor com um tools/list de teste no ruler-mcp (price floors).
+// Espelha /api/validate. Só precisa do rulerToken (o av_bearer não é usado no
+// tools/list). Mesma taxonomia: 200 ok | 401 chave inválida | 502 inacessível.
+app.post('/api/validate-ruler', async (req, res) => {
+  const token = req.body?.rulerToken;
+  try {
+    const tools = await listRulerTools(token);
+    res.status(200).json({ ok: true, toolCount: Array.isArray(tools) ? tools.length : 0 });
+  } catch (err) {
+    if (err instanceof McpAuthError) {
+      res.status(401).json({ ok: false, error: 'Chave do ruler-mcp inválida.' });
+    } else {
+      res.status(502).json({ ok: false, error: 'ruler-mcp inacessível no momento.' });
+    }
+  }
+});
+
 // Monta o snapshot do dia: 4 chamadas em PARALELO (Promise.allSettled). Falha
 // parcial não derruba o snapshot (campo null + entrada em errors). 502 só se as 4 falharem.
+// (O ruler-mcp NÃO participa do snapshot — floors são sob demanda.)
 app.post('/api/snapshot', async (req, res) => {
   const token = req.body?.moodlrToken;
   if (!token) {
@@ -136,7 +160,7 @@ app.post('/api/snapshot', async (req, res) => {
 
 // Chat com o agente. Resposta em SSE (delta/tool/done/error).
 app.post('/api/chat', async (req, res) => {
-  const { messages, managerName, moodlrToken, model, snapshot } = req.body || {};
+  const { messages, managerName, moodlrToken, model, snapshot, rulerToken, avBearer } = req.body || {};
 
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ ok: false, error: 'messages inválido.' });
@@ -160,7 +184,7 @@ app.post('/api/chat', async (req, res) => {
   res.write(': ok\n\n'); // comentário SSE inicial → abre o stream / força flush
 
   // Cliente fechou a aba/conexão no meio do stream: aborta o loop do agente
-  // (para de gastar Anthropic + moodlr-ops num socket morto).
+  // (para de gastar Anthropic + moodlr-ops/ruler-mcp num socket morto).
   const abort = new AbortController();
   res.on('close', () => {
     if (!res.writableEnded) abort.abort();
@@ -174,6 +198,9 @@ app.post('/api/chat', async (req, res) => {
       moodlrToken,
       model: chosenModel,
       snapshot,
+      // ruler-mcp: opcionais. Sem rulerToken, o agente nem expõe as tools de floor.
+      rulerToken: rulerToken || null,
+      avBearer: avBearer || null,
       signal: abort.signal,
     });
   } catch (err) {

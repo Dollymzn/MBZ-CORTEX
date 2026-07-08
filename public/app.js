@@ -272,6 +272,11 @@
   var obToken = $('#ob-token');
   var obTokenToggle = $('#ob-token-toggle');
   var obModel = $('#ob-model');
+  var obRulerToken = $('#ob-ruler-token');
+  var obRulerToggle = $('#ob-ruler-toggle');
+  var obAvBearer = $('#ob-avbearer');
+  var obAvBearerToggle = $('#ob-avbearer-toggle');
+  var obAvBearerHint = $('#ob-avbearer-hint');
   var obSubmit = $('#ob-submit');
   var obSpinner = $('#ob-spinner');
   var obStatus = $('#ob-status');
@@ -280,6 +285,25 @@
     var isPwd = obToken.type === 'password';
     obToken.type = isPwd ? 'text' : 'password';
   });
+
+  obRulerToggle.addEventListener('click', function () {
+    var isPwd = obRulerToken.type === 'password';
+    obRulerToken.type = isPwd ? 'text' : 'password';
+  });
+
+  obAvBearerToggle.addEventListener('click', function () {
+    var isPwd = obAvBearer.type === 'password';
+    obAvBearer.type = isPwd ? 'text' : 'password';
+  });
+
+  // Aviso dim: se o gestor preencher a key do ruler-mcp sem av_bearer, algumas
+  // tools de price floor vao exigir av_bearer em runtime - avisa mas nao bloqueia.
+  function updateAvBearerHint() {
+    var show = !!obRulerToken.value.trim() && !obAvBearer.value.trim();
+    obAvBearerHint.classList.toggle('hidden', !show);
+  }
+  obRulerToken.addEventListener('input', updateAvBearerHint);
+  obAvBearer.addEventListener('input', updateAvBearerHint);
 
   function setObStatus(msg, kind) {
     obStatus.textContent = msg || '';
@@ -316,11 +340,38 @@
     }
   }
 
+  async function validateRulerKey(token) {
+    try {
+      var res = await fetch('/api/validate-ruler', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rulerToken: token })
+      });
+      var json = null;
+      try { json = await res.json(); } catch (e) { json = null; }
+
+      if (res.ok && json && json.ok) {
+        return { ok: true, toolCount: json.toolCount };
+      }
+      if (res.status === 401) {
+        return { ok: false, error: 'KEY RULER-MCP INVALIDA' };
+      }
+      if (res.status === 502) {
+        return { ok: false, error: 'RULER-MCP INACESSIVEL' };
+      }
+      return { ok: false, error: (json && json.error) || 'ERRO DESCONHECIDO // TENTE NOVAMENTE' };
+    } catch (e) {
+      return { ok: false, error: 'FALHA DE REDE // VERIFIQUE A CONEXAO' };
+    }
+  }
+
   obForm.addEventListener('submit', async function (e) {
     e.preventDefault();
     var name = obName.value.trim();
     var token = obToken.value.trim();
     var model = obModel.value;
+    var rulerToken = obRulerToken.value.trim();
+    var avBearer = obAvBearer.value.trim();
 
     if (!name || !token) {
       setObStatus('PREENCHA NOME E KEY', 'error');
@@ -332,32 +383,59 @@
 
     var result = await validateKey(token);
 
-    setObLoading(false);
-
     if (!result.ok) {
+      setObLoading(false);
       setObStatus(result.error, 'error');
-      setConnStatus(false);
+      setMoodlrConnStatus(false);
       return;
     }
 
+    // Key do moodlr-ops OK. A key do ruler-mcp e OPCIONAL, mas se preenchida
+    // precisa validar tambem - se falhar, NAO libera entrada (gestor corrige
+    // ou apaga o campo pra entrar sem ruler). av_bearer nao tem validacao
+    // propria (usada pelas tools em runtime).
+    if (rulerToken) {
+      setObStatus('validando ruler-mcp...', 'loading');
+      var rulerResult = await validateRulerKey(rulerToken);
+      if (!rulerResult.ok) {
+        setObLoading(false);
+        setObStatus(rulerResult.error, 'error');
+        return;
+      }
+    }
+
+    setObLoading(false);
     setObStatus('');
     state.config = { name: name, moodlrToken: token, model: model };
+    if (rulerToken) state.config.rulerToken = rulerToken;
+    if (avBearer) state.config.avBearer = avBearer;
     lsSet(LS_CONFIG, state.config);
-    setConnStatus(true);
+    setMoodlrConnStatus(true);
     enterApp(true);
   });
 
   /* ============================== 6. HEADER / CONNECTION / RESET ============================== */
 
-  var connDot = $('#conn-dot');
-  var connLabel = $('#conn-label');
+  var connIndicatorMoodlr = $('#conn-indicator-moodlr');
+  var connDotMoodlr = $('#conn-dot-moodlr');
+  var connIndicatorRuler = $('#conn-indicator-ruler');
+  var connDotRuler = $('#conn-dot-ruler');
   var modelSelect = $('#model-select');
   var changeConfigBtn = $('#change-config-btn');
 
-  function setConnStatus(online) {
-    connDot.classList.toggle('online', !!online);
-    connDot.classList.toggle('offline', !online);
-    connLabel.textContent = online ? 'conectado' : 'offline';
+  function setMoodlrConnStatus(online) {
+    connDotMoodlr.classList.toggle('online', !!online);
+    connDotMoodlr.classList.toggle('offline', !online);
+    connIndicatorMoodlr.title = 'moodlr-ops: ' + (online ? 'conectado' : 'offline');
+  }
+
+  // status: 'ok' (verde, validou), 'fail' (vermelho, validacao falhou),
+  // 'unset' (cinza, sem rulerToken configurado - tools de price floor desabilitadas)
+  function setRulerConnStatus(status) {
+    connDotRuler.classList.toggle('online', status === 'ok');
+    connDotRuler.classList.toggle('offline', status === 'fail');
+    var label = status === 'ok' ? 'conectado' : status === 'fail' ? 'falhou na validação' : 'não configurado';
+    connIndicatorRuler.title = 'ruler-mcp: ' + label;
   }
 
   modelSelect.addEventListener('change', function () {
@@ -562,16 +640,23 @@
         // stringify falhou de forma inesperada - manda o snapshot como esta
       }
 
+      var chatBody = {
+        messages: state.chatHistory,
+        managerName: state.config.name,
+        moodlrToken: state.config.moodlrToken,
+        model: state.config.model,
+        snapshot: snapshotPayload
+      };
+      // ruler-mcp (price floors) e' opcional - so manda os campos quando o
+      // gestor de fato configurou as keys, pra o backend saber que as tools
+      // de price floor estao disponiveis.
+      if (state.config.rulerToken) chatBody.rulerToken = state.config.rulerToken;
+      if (state.config.avBearer) chatBody.avBearer = state.config.avBearer;
+
       var res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: state.chatHistory,
-          managerName: state.config.name,
-          moodlrToken: state.config.moodlrToken,
-          model: state.config.model,
-          snapshot: snapshotPayload
-        })
+        body: JSON.stringify(chatBody)
       });
 
       if (res.status === 413) {
@@ -665,7 +750,7 @@
         appendErrorMessage('Snapshot grande demais para o chat — atualize os dados ou pergunte direto.');
       } else {
         appendErrorMessage('Falha de conexao com o CORTEX. Verifique a rede e tente de novo.');
-        setConnStatus(false);
+        setMoodlrConnStatus(false);
       }
     } finally {
       setChatBusy(false);
@@ -734,14 +819,14 @@
       if (res.ok && json && json.ok && json.snapshot) {
         state.snapshot = json.snapshot;
         lsSet(LS_SNAPSHOT, state.snapshot);
-        setConnStatus(true);
+        setMoodlrConnStatus(true);
         renderDashboard();
       } else {
-        setConnStatus(false);
+        setMoodlrConnStatus(false);
         showSnapshotFetchError((json && json.error) || ('HTTP ' + res.status));
       }
     } catch (e) {
-      setConnStatus(false);
+      setMoodlrConnStatus(false);
       showSnapshotFetchError('falha de rede');
     } finally {
       setDashLoading(false);
@@ -1194,6 +1279,14 @@
 
     modelSelect.value = state.config.model || 'claude-sonnet-5';
 
+    // ruler-mcp: cinza se sem rulerToken configurado, verde se configurado
+    // (foi validado no onboarding ou em uma sessao anterior). O chip de
+    // sugestao "Floors do dominio?" so aparece quando as tools de price
+    // floor estao de fato disponiveis pro agente.
+    setRulerConnStatus(state.config.rulerToken ? 'ok' : 'unset');
+    var rulerChip = $('#chip-ruler-floors');
+    if (rulerChip) rulerChip.classList.toggle('hidden', !state.config.rulerToken);
+
     // chat history
     if (!isFreshOnboarding) {
       state.chatHistory = lsGet(LS_CHAT) || [];
@@ -1213,7 +1306,7 @@
     } else if (state.snapshot) {
       // gestor recorrente com snapshot fresco (<30min): a ultima interacao com
       // o moodlr-ops foi bem-sucedida, entao o indicador nao deve ficar em "--".
-      setConnStatus(true);
+      setMoodlrConnStatus(true);
     }
 
     chatInput.focus();

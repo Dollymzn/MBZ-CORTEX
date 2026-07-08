@@ -224,6 +224,28 @@ select { cursor: pointer; }
 
 .onboarding-form .field { margin-bottom: 1.1rem; }
 
+.ob-subsection {
+  margin: 0.3rem 0 1.1rem;
+  padding-top: 1rem;
+  border-top: 1px dashed var(--line-alt);
+}
+.ob-subsection-title {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  margin-bottom: 0.9rem;
+}
+.ob-subsection-title .dim { color: var(--text-dim); }
+
+.field-hint {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  line-height: 1.4;
+  margin: 6px 0 0;
+}
+
 .input-with-toggle { position: relative; display: flex; align-items: center; }
 .input-with-toggle input { padding-right: 42px; }
 .icon-toggle-btn {
@@ -311,6 +333,13 @@ select { cursor: pointer; }
   display: flex;
   align-items: center;
   gap: 0.9rem;
+}
+
+.conn-indicators {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
 }
 
 .conn-indicator {

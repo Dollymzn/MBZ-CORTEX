@@ -145,6 +145,37 @@
           </select>
         </div>
 
+        <div class="ob-subsection">
+          <div class="ob-subsection-title">// PRICE FLOORS <span class="dim">(opcional)</span></div>
+
+          <div class="field">
+            <label for="ob-ruler-token">Key do ruler-mcp</label>
+            <div class="input-with-toggle">
+              <input id="ob-ruler-token" name="rulerToken" type="password" placeholder="Bearer token (ruler-mcp)" autocomplete="off" spellcheck="false" />
+              <button type="button" id="ob-ruler-toggle" class="icon-toggle-btn" aria-label="Mostrar ou ocultar a key">
+                <svg id="ob-ruler-eye" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                  <path fill="currentColor" d="M12 5c-5 0-9.27 3.11-11 7 1.73 3.89 6 7 11 7s9.27-3.11 11-7c-1.73-3.89-6-7-11-7zm0 11.5A4.5 4.5 0 1 1 16.5 12 4.5 4.5 0 0 1 12 16.5zm0-7A2.5 2.5 0 1 0 14.5 12 2.5 2.5 0 0 0 12 9.5z"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="ob-avbearer">Key da ActiveView (av_bearer)</label>
+            <div class="input-with-toggle">
+              <input id="ob-avbearer" name="avBearer" type="password" placeholder="av_bearer" autocomplete="off" spellcheck="false" />
+              <button type="button" id="ob-avbearer-toggle" class="icon-toggle-btn" aria-label="Mostrar ou ocultar a key">
+                <svg id="ob-avbearer-eye" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                  <path fill="currentColor" d="M12 5c-5 0-9.27 3.11-11 7 1.73 3.89 6 7 11 7s9.27-3.11 11-7c-1.73-3.89-6-7-11-7zm0 11.5A4.5 4.5 0 1 1 16.5 12 4.5 4.5 0 0 1 12 16.5zm0-7A2.5 2.5 0 1 0 14.5 12 2.5 2.5 0 0 0 12 9.5z"/>
+                </svg>
+              </button>
+            </div>
+            <p class="field-hint hidden" id="ob-avbearer-hint">sem av_bearer, as ferramentas que dependem dela vão orientar você na conversa</p>
+          </div>
+
+          <p class="field-hint">sem as keys, as ferramentas de price floor ficam desabilitadas</p>
+        </div>
+
         <button type="submit" id="ob-submit" class="btn-primary">
           <span class="btn-label">ENTRAR</span>
           <span class="spinner hidden" id="ob-spinner" aria-hidden="true"></span>
@@ -168,9 +199,15 @@
     </div>
 
     <div class="header-controls">
-      <div class="conn-indicator" id="conn-indicator" title="Status do moodlr-ops">
-        <span class="conn-dot" id="conn-dot"></span>
-        <span class="conn-label" id="conn-label">--</span>
+      <div class="conn-indicators">
+        <div class="conn-indicator" id="conn-indicator-moodlr" title="moodlr-ops: --">
+          <span class="conn-dot" id="conn-dot-moodlr"></span>
+          <span class="conn-label">moodlr-ops</span>
+        </div>
+        <div class="conn-indicator" id="conn-indicator-ruler" title="ruler-mcp: não configurado">
+          <span class="conn-dot" id="conn-dot-ruler"></span>
+          <span class="conn-label">ruler-mcp</span>
+        </div>
       </div>
 
       <label class="visually-hidden" for="model-select">Versão do agente</label>
@@ -200,6 +237,7 @@
         <button type="button" class="chip" data-msg="Conta FB com problema?">Conta FB com problema?</button>
         <button type="button" class="chip" data-msg="Adsets com fadiga?">Adsets com fadiga?</button>
         <button type="button" class="chip" data-msg="Melhor hora pra escalar?">Melhor hora pra escalar?</button>
+        <button type="button" class="chip hidden" id="chip-ruler-floors" data-msg="Como estão os floors do meu domínio?">Floors do domínio?</button>
       </div>
 
       <form id="chat-form" class="chat-input-bar">
