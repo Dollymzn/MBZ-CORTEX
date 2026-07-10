@@ -8,8 +8,9 @@
 // As descriptions incorporam o guia operacional do moodlr-ops: o que cada tool
 // devolve de fato (bruto vs líquido), pegadinhas e quando preferir outra tool.
 //
-// NOTA sobre a contagem: a spec fala em "16 ferramentas", mas enumera apenas 15
-// ferramentas concretas do moodlr-ops. Implementamos exatamente as 15 nomeadas.
+// NOTA sobre a contagem: a spec original falava em "16 ferramentas" mas
+// enumerava 15 concretas; depois foram acrescentadas mais 13, totalizando as
+// 28 ferramentas implementadas abaixo.
 
 /** @type {Array<{name:string, description:string, input_schema:object}>} */
 export const TOOLS = [
@@ -85,6 +86,43 @@ export const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'receita_diaria_site',
+    description:
+      'Receita BRUTA (antes do revshare) dia a dia. Com id, foca em UM projeto; ' +
+      'sem id, agrega por dia TODOS os projetos do gestor. Use para ver a curva ' +
+      'diária de receita de um blog específico ou o total diário da operação. ' +
+      '⚠️ Valor BRUTO — para o número líquido real (pós-revshare) use ' +
+      'resumo_financeiro ou resumo_usuarios.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: {
+          type: ['integer', 'string'],
+          description: 'Opcional. ID do projeto/blog. Sem id, agrega por dia todos os projetos do gestor.',
+        },
+        start_date: { type: 'string', description: 'Data inicial (YYYY-MM-DD).' },
+        end_date: { type: 'string', description: 'Data final (YYYY-MM-DD).' },
+      },
+      required: ['start_date', 'end_date'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'cotacao_dolar',
+    description:
+      'Cotação USD/BRL de uma data específica. Use para converter valores em ' +
+      'dólar (ex.: gasto/receita de contas que operam em USD) para reais em ' +
+      'análises e comparações.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        date: { type: 'string', description: 'Data de referência (YYYY-MM-DD).' },
+      },
+      required: ['date'],
+      additionalProperties: false,
+    },
+  },
 
   // ─────────────────────────────── CAMPANHAS ────────────────────────────────
   {
@@ -156,6 +194,58 @@ export const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'campanhas_utm',
+    description:
+      'Relatório de um projeto agrupado por UTM (origem/campanha) e país numa ' +
+      'data, comparando com ontem: gasto, receita, revshare e ROI. Use para ver ' +
+      'qual UTM/origem de tráfego está performando melhor ou pior dentro de um ' +
+      'blog. ⚠️ revenue é BRUTA; revshare e lucro/roi já vêm pós-revshare (líquidos).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: ['integer', 'string'], description: 'ID do projeto/blog.' },
+        date: { type: 'string', description: 'Data de referência (YYYY-MM-DD).' },
+      },
+      required: ['id', 'date'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'relatorio_chatbot',
+    description:
+      'Funil de CHATBOT de um projeto numa data: campanhas que alimentam o ' +
+      'chatbot (gasto, receita, ROI), comparando com ontem e com a média dos ' +
+      'últimos 30 dias. SÓ para projetos com chatbot=true na lista de projetos — ' +
+      'confira o flag antes de chamar. ⚠️ revenue é BRUTA; lucro e roi_percentage ' +
+      'já vêm pós-revshare (líquidos).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: ['integer', 'string'], description: 'ID do projeto/blog.' },
+        date: { type: 'string', description: 'Data de referência (YYYY-MM-DD).' },
+      },
+      required: ['id', 'date'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'ranking_volume',
+    description:
+      'Ranking dos projetos por VOLUME de campanhas criadas no período (não é ' +
+      'ranking de lucro/receita). Use para ver onde a operação está mais ativa ' +
+      'em criação de campanhas — bom para identificar blogs com baixo volume que ' +
+      'poderiam escalar mais.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        start_date: { type: 'string', description: 'Data inicial (YYYY-MM-DD).' },
+        end_date: { type: 'string', description: 'Data final (YYYY-MM-DD).' },
+      },
+      required: ['start_date', 'end_date'],
+      additionalProperties: false,
+    },
+  },
 
   // ─────────────────────────────── INTELIGÊNCIA ─────────────────────────────
   {
@@ -220,6 +310,48 @@ export const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: 'rotacoes_criativo',
+    description:
+      'Histórico de ROTAÇÕES de criativo já executadas: CPR e eCPM antes/depois ' +
+      'da troca e o resultado. Complementa fadiga_criativo — use para conferir ' +
+      'se uma troca de criativo já feita realmente melhorou o desempenho do ' +
+      'adset. Sem id_blog traz todas as rotações.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id_blog: { type: ['integer', 'string'], description: 'Opcional. ID do blog para filtrar.' },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'adsets_pausados',
+    description:
+      'Adsets atualmente PAUSADOS pelo Auto Scale: projeto, campanha e quando ' +
+      'reativam. Use para "o que está pausado agora" e para saber quando um ' +
+      'adset volta a rodar. Também já vem no snapshot do dia — responda do ' +
+      'snapshot se a pergunta for geral.',
+    input_schema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+  },
+  {
+    name: 'historico_facebook',
+    description:
+      'Timeline de ALTERAÇÕES feitas no Facebook (mudança de budget, status, ' +
+      'etc.). Use para investigar "o que mudou nessa conta/adset" e quando. ' +
+      'Pode filtrar por blog (id_blog), por adset específico (adset), pelos ' +
+      'dois, ou nenhum (traz tudo).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id_blog: { type: ['integer', 'string'], description: 'Opcional. ID do blog para filtrar.' },
+        adset: { type: 'string', description: 'Opcional. Nome ou ID do adset para filtrar.' },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
 
   // ───────────────────────────────── INFRA ──────────────────────────────────
   {
@@ -253,6 +385,66 @@ export const TOOLS = [
       required: [],
       additionalProperties: false,
     },
+  },
+  {
+    name: 'contas_google_ads',
+    description:
+      'Contas do Google Ads do gestor: customer_id, status e vínculo com o ' +
+      'projeto. Análogo a contas_facebook mas do lado Google Ads. Use quando ' +
+      'perguntarem sobre as contas Google Ads em si (quais existem, status, ' +
+      'qual projeto).',
+    input_schema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+  },
+  {
+    name: 'conteudo_writing_plus',
+    description:
+      'Fila de conteúdos do WRITING PLUS (mirb/acervo/card/botões) — linha de ' +
+      'produção separada de conteudo_writing. Use quando o gestor perguntar ' +
+      'sobre produção de mirb, acervo, card ou botões. Aceita uma data opcional.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        data: { type: 'string', description: 'Opcional. Data de referência (YYYY-MM-DD).' },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'posts_wordpress',
+    description:
+      'Últimos posts publicados no WordPress dos sites informados (título, data ' +
+      'de publicação, URL). Use para conferir se o conteúdo programado já foi ao ' +
+      'ar ou para ver a publicação recente de um ou mais blogs.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        sites: {
+          type: 'string',
+          description:
+            'Domínio(s) dos sites a consultar. Aceita um domínio único ou uma ' +
+            'lista separada por vírgula (ex.: "miawzy.com,glooum.com").',
+        },
+      },
+      required: ['sites'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'tickets',
+    description:
+      'Tickets de suporte abertos na operação: status, data e gestor ' +
+      'responsável. Use quando perguntarem sobre chamados/tickets de suporte em ' +
+      'aberto ou histórico.',
+    input_schema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+  },
+  {
+    name: 'status_coletores_fb',
+    description:
+      'Progresso dos coletores/scripts que puxam dados do Facebook: status da ' +
+      'coleta, se está rodando, atrasada ou concluída. Use para diagnosticar se ' +
+      'um dado do FB pode estar desatualizado por falha/atraso na coleta.',
+    input_schema: { type: 'object', properties: {}, required: [], additionalProperties: false },
   },
 ];
 

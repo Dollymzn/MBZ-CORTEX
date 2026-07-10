@@ -21,13 +21,13 @@
 //   - Streaming: client.messages.stream({...}); deltas via stream.on("text");
 //     ao final const msg = await stream.finalMessage().
 
-import { createHash } from 'node:crypto';
 import Anthropic from '@anthropic-ai/sdk';
 import { TOOLS } from './tools.js';
 import { RULER_TOOLS, RULER_TOOL_NAMES } from './tools-ruler.js';
 import { callTool, McpAuthError, McpTimeoutError, McpNetworkError } from './moodlr.js';
 import { callRulerTool } from './ruler.js';
 import { McpToolError } from './mcp-core.js';
+import { guardedApplyFloor, redactSecrets } from './floor-guard.js';
 
 const MAX_ROUNDS = 8;
 const MAX_TOKENS = 8192;
@@ -68,63 +68,9 @@ function snapshotAgeMinutes(snapshot) {
   return Math.max(0, Math.round((Date.now() - ts) / 60_000));
 }
 
-// ═══════════════════════ TRAVA DO APLICAR_FLOOR (server-side) ══════════════
-// Registro de previews em memória. Chaveado pelo HASH SHA-256 do rulerToken —
-// NUNCA o token cru. Guarda o último preview {network, domain, ts} por gestor.
-// TTL 15 min + cap de tamanho (não cresce sem limite). Como é código, o modelo
-// não tem como pular a guarda por prompt injection.
-const PREVIEW_TTL_MS = 15 * 60 * 1000;
-const PREVIEW_CAP = 500; // nº máx. de gestores distintos rastreados simultaneamente
-const previewRegistry = new Map(); // hash(rulerToken) -> { network, domain, ts }
-
-function tokenHash(token) {
-  return createHash('sha256').update(String(token ?? '')).digest('hex');
-}
-
-// Normaliza network/domain para comparação robusta (o modelo pode variar
-// caixa/espacos entre o preview e o confirm).
-function normKey(s) {
-  return String(s ?? '').trim().toLowerCase();
-}
-
-function prunePreviews(now = Date.now()) {
-  for (const [k, v] of previewRegistry) {
-    if (now - v.ts > PREVIEW_TTL_MS) previewRegistry.delete(k);
-  }
-  if (previewRegistry.size > PREVIEW_CAP) {
-    // Descarta os mais antigos até voltar ao teto.
-    const oldestFirst = [...previewRegistry.entries()].sort((a, b) => a[1].ts - b[1].ts);
-    for (let i = 0; i < oldestFirst.length - PREVIEW_CAP; i++) {
-      previewRegistry.delete(oldestFirst[i][0]);
-    }
-  }
-}
-
-function registerPreview(rulerToken, network, domain) {
-  previewRegistry.set(tokenHash(rulerToken), {
-    network: normKey(network),
-    domain: normKey(domain),
-    ts: Date.now(),
-  });
-  // Poda DEPOIS de inserir → garante a pós-condição size <= PREVIEW_CAP a cada
-  // registro (podar antes deixaria o Map estabilizar em CAP+1).
-  prunePreviews();
-}
-
-function hasValidPreview(rulerToken, network, domain) {
-  const key = tokenHash(rulerToken);
-  const rec = previewRegistry.get(key);
-  if (!rec) return false;
-  if (Date.now() - rec.ts > PREVIEW_TTL_MS) {
-    previewRegistry.delete(key);
-    return false;
-  }
-  return rec.network === normKey(network) && rec.domain === normKey(domain);
-}
-
-function consumePreview(rulerToken) {
-  previewRegistry.delete(tokenHash(rulerToken));
-}
+// A TRAVA do aplicar_floor (registro de previews, preview→confirm) vive em
+// floor-guard.js — módulo COMPARTILHADO entre este chat e as rotas do dashboard
+// de floors (server.js), pra que haja UM único cadeado, não dois.
 
 // ─────────────────────────── system prompt ───────────────────────────────
 // Bloco ESTÁVEL (persona + regras). É igual byte-a-byte para TODOS os gestores e
@@ -141,7 +87,7 @@ ESTILO: português do Brasil, direto e informal, pegada cyberpunk/hacker sem exa
 POSTURA: analítico e honesto. Aponta o que está ruim sem dourar a pílula, sugere o que ESCALAR e o que CORTAR. Lê ROI, eCPM, CPR e fadiga de criativo como quem faz isso o dia inteiro. Quando os números pedem ação, recomenda a ação — não fica em cima do muro. Respostas em markdown, objetivas. NUNCA inventa números: quando faltar dado, diz o que falta e qual ferramenta pode buscar.
 
 COMO USAR OS DADOS (regra central):
-- Você recebe um SNAPSHOT do dia (no bloco "CONTEXTO DESTA SESSÃO", logo abaixo) com: receita/gasto/lucro/ROI por projeto (resumo_usuarios), saúde das contas de anúncio do Facebook (saude_contas_fb), fadiga de criativos (fadiga_criativo) e a lista de projetos (listar_projetos).
+- Você recebe um SNAPSHOT do dia (no bloco "CONTEXTO DESTA SESSÃO", logo abaixo) com: receita/gasto/lucro/ROI por projeto (resumo_usuarios), saúde das contas de anúncio do Facebook (saude_contas_fb), fadiga de criativos (fadiga_criativo), adsets pausados pelo Auto Scale (adsets_pausados) e a lista de projetos (listar_projetos).
 - Perguntas COBERTAS pelo snapshot (visão geral do dia, um blog específico da lista, alertas de conta/fadiga) → RESPONDA DIRETO do snapshot, SEM chamar ferramenta. É instantâneo.
 - Dados GRANULARES ou de PERÍODO DIFERENTE do snapshot (campanhas de um projeto, receita por artigo, redirects, yield por hora, ROAS cross, fechamento, sequência de dias, período que não é o do snapshot) → USE as ferramentas.
 - resumo_usuarios é PESADO: só chame com intervalos curtos e prefira o snapshot sempre que a pergunta for sobre o período já carregado.
@@ -152,6 +98,12 @@ COMO USAR OS DADOS (regra central):
 
 REGRAS DE OURO DOS DADOS (moodlr-ops):
 - REVSHARE: toda tool devolve receita/revenue/gam_revenue/adx BRUTA (antes do revshare, ~10%). Os campos lucro, net_profit, real_profit, roi_percentage e revshare_revenue já são LÍQUIDOS — use esses pro número real. NUNCA recalcule ROI/lucro a partir da receita bruta (não bate). Sempre diga se o valor citado é BRUTO ou LÍQUIDO.
+- SEMÂNTICA POR TOOL (bruto vs pós-revshare — reporte SEMPRE o pós-revshare como número real):
+  · roas_cross → profit/roas são sobre receita BRUTA (não descontam revshare); trate como ROAS bruto, break-even ≈ 1,11x.
+  · resumo_financeiro → lucro/ROI reais em net_profit/revshare_revenue/roi_percentage (já pós-revshare).
+  · resumo_usuarios → lucro/ROI reais em revshare_profit/net_profit/roi_percentage (já pós-revshare).
+  · receita_por_artigo, campanhas_utm, relatorio_chatbot → revenue=BRUTA, revshare=líquida; lucro/roi já pós-revshare.
+  · sequencia_dias → receita pós-revshare vs gasto FB. receita_diaria_site → revenue=BRUTA.
 - BREAK-EVEN: ROAS bruto de break-even ≈ 1,11x (efeito do revshare). Abaixo disso o projeto SANGRA mesmo com "receita > gasto".
 - FORMATO DOS NÚMEROS: ROAS SEMPRE como multiplicador ("ROAS 1,24x"), NUNCA em porcentagem — "ROAS 123,98%" confunde com ROI. Quando quiser %, use ROI e rotule como ROI (ROI bruto = ROAS − 1; ex.: ROAS 1,24x = ROI bruto +23,98%). Ao citar lucro bruto, deixe claro que NÃO é dinheiro no bolso: confronte com o break-even 1,11x e diga a folga/déficit (ex.: "1,24x vs break-even 1,11x — folga de 0,13x"); o líquido oficial sai no resumo_financeiro do dia seguinte.
 - DIA CORRENTE vs FECHADO: o dia de hoje só sai nas tools AO VIVO (roas_cross, resumo_usuarios, analise_campanhas). resumo_financeiro e fechamento_mensal só trazem períodos FECHADOS — hoje vem vazio e fecha ~1 dia depois.
@@ -261,51 +213,6 @@ function friendlyError(err) {
 }
 
 // ──────────────────── execução/roteamento de uma tool ─────────────────────
-/**
- * Aplica a TRAVA server-side do aplicar_floor. Retorna o payload da tool.
- * Lança McpToolError (vira tool_result is_error) quando a guarda barra a operação.
- */
-async function applyFloorGuarded(input, ctx) {
-  const network = input?.network;
-  const domain = input?.domain;
-  // Fail-safe: SÓ o booleano `true` conta como confirmação. String "true",
-  // 1, "1", {} etc. caem no caminho de PREVIEW (nunca aplicam por engano).
-  const wantsConfirm = input?.confirm === true;
-
-  // Permite injetar o transporte no teste; em produção usa o callRulerTool real.
-  const callRuler = ctx.callRuler || callRulerTool;
-
-  // O modelo nunca deve injetar `actor` — é o backend que define quem aprovou.
-  const base = { ...(input || {}) };
-  delete base.actor;
-
-  if (!wantsConfirm) {
-    // PREVIEW: roda sem confirm (o servidor devolve o preview, não aplica) e
-    // REGISTRA o preview para destravar um confirm subsequente.
-    const args = { ...base, confirm: false };
-    const data = await callRuler('aplicar_floor', args, ctx.rulerToken, ctx.avBearer);
-    registerPreview(ctx.rulerToken, network, domain);
-    return data;
-  }
-
-  // CONFIRM: só passa com preview recente do mesmo gestor + network + domain.
-  if (!hasValidPreview(ctx.rulerToken, network, domain)) {
-    throw new McpToolError(
-      'TRAVA DE SEGURANÇA: aplicar_floor com confirm=true foi BLOQUEADO — não há um preview recente ' +
-        '(últimos 15 min) para este network+domain neste gestor. Rode aplicar_floor SEM confirm primeiro, ' +
-        'mostre o antes→depois ao gestor, colha a aprovação explícita e só então confirme. ' +
-        'Não há como pular esta etapa.',
-    );
-  }
-  const args = { ...base, confirm: true, actor: sanitizeManagerName(ctx.managerName) };
-  const data = await callRuler('aplicar_floor', args, ctx.rulerToken, ctx.avBearer);
-  consumePreview(ctx.rulerToken); // one-shot: um preview autoriza UMA aplicação
-  return data;
-}
-
-// Exportado APENAS para testes da trava (não usar em produção).
-export const __floorGuardTestApi = { applyFloorGuarded, previewRegistry, PREVIEW_TTL_MS };
-
 /** Roteia a execução de UMA tool para o MCP certo, aplicando as guardas do ruler. */
 async function executeTool(name, input, ctx) {
   if (RULER_TOOL_NAMES.has(name)) {
@@ -317,7 +224,15 @@ async function executeTool(name, input, ctx) {
           'bearer da ActiveView). Peça ao gestor para habilitar o módulo de floors em "trocar config".',
       );
     }
-    if (name === 'aplicar_floor') return applyFloorGuarded(input, ctx);
+    if (name === 'aplicar_floor') {
+      // Trava compartilhada (floor-guard.js): preview→confirm. Retorna {mode, data}.
+      return guardedApplyFloor(input, {
+        rulerToken: ctx.rulerToken,
+        avBearer: ctx.avBearer,
+        managerName: ctx.managerName,
+        callRuler: callRulerTool,
+      });
+    }
     return callRulerTool(name, input, ctx.rulerToken, ctx.avBearer);
   }
   // Default: moodlr-ops (comportamento inalterado).
@@ -399,13 +314,24 @@ export async function runAgentStream({ res, messages, managerName, moodlrToken, 
           try {
             const data = await executeTool(tu.name, tu.input || {}, ctx);
             sse(res, 'tool', { name: tu.name, status: 'end', ok: true });
+            // Dados de tools do ruler também vão pro NAVEGADOR (evento tooldata),
+            // pro dashboard de floors abrir/atualizar sozinho quando o agente
+            // consulta ou mexe em price rules no chat. Já sanitizado (sem av_bearer).
+            if (RULER_TOOL_NAMES.has(tu.name)) {
+              sse(res, 'tooldata', {
+                name: tu.name,
+                network: tu.input?.network,
+                domain: tu.input?.domain,
+                result: data,
+              });
+            }
             return { type: 'tool_result', tool_use_id: tu.id, content: JSON.stringify(data) };
           } catch (err) {
             sse(res, 'tool', { name: tu.name, status: 'end', ok: false });
             return {
               type: 'tool_result',
               tool_use_id: tu.id,
-              content: JSON.stringify({ error: err?.message || 'falha na ferramenta' }),
+              content: JSON.stringify({ error: redactSecrets(err?.message || 'falha na ferramenta', ctx) }),
               is_error: true,
             };
           }

@@ -21,6 +21,7 @@
   var LS_CONFIG = 'cortex.config';
   var LS_CHAT = 'cortex.chat';
   var LS_SNAPSHOT = 'cortex.snapshot';
+  var LS_FLOORS = 'cortex.floors';
 
   var MAX_CHAT_HISTORY = 40;
   var SNAPSHOT_WARN_MS = 30 * 60 * 1000; // 30 min
@@ -134,6 +135,37 @@
   function formatEcpm(n) {
     if (n === null || n === undefined || !isFinite(n)) return '—';
     return '$ ' + n.toFixed(2).replace('.', ',');
+  }
+
+  function formatPct1(n) {
+    if (n === null || n === undefined || !isFinite(n)) return '—';
+    return n.toFixed(1).replace('.', ',') + '%';
+  }
+
+  function formatFloorNum(n) {
+    if (n === null || n === undefined || !isFinite(n)) return '—';
+    return Number(n).toFixed(2);
+  }
+
+  function formatIntBR(n) {
+    if (n === null || n === undefined || !isFinite(n)) return '—';
+    return Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  }
+
+  // Toast neon simples, no canto inferior direito - usado pelo fluxo de FLOORS
+  // (aplicar/erro), sem depender de nenhum componente pre-existente.
+  function showToast(message, kind) {
+    var container = $('#toast-container');
+    if (!container) return;
+    var el = document.createElement('div');
+    el.className = 'toast' + (kind ? ' toast-' + kind : '');
+    el.textContent = message;
+    container.appendChild(el);
+    requestAnimationFrame(function () { el.classList.add('toast-show'); });
+    setTimeout(function () {
+      el.classList.remove('toast-show');
+      setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 320);
+    }, 3600);
   }
 
   /* ============================== 4. MARKDOWN MINI-RENDERER ============================== */
@@ -712,6 +744,10 @@
             scrollChatToBottom();
           } else if (eventType === 'tool') {
             handleToolEvent(data);
+          } else if (eventType === 'tooldata') {
+            // tools do ruler (price floors) tambem alimentam o dashboard de FLOORS
+            // direto do chat - nao afeta o parsing de delta/tool/error/done acima.
+            handleFloorsToolData(data);
           } else if (eventType === 'error') {
             sawError = true;
             if (typingEl && typingEl.parentNode) typingEl.parentNode.removeChild(typingEl);
@@ -1254,6 +1290,705 @@
     renderSnapshotErrors(snapshot);
   }
 
+  /* ============================== 8b. FLOORS (price rules ActiveView) ============================== */
+  // Sub-aba do dashboard, so visivel quando o gestor configurou rulerToken (onboarding
+  // ou "trocar config"). Toda a view roda sobre as rotas /api/ruler/* (contrato
+  // congelado): POST rules (carrega resumo+regras), POST sugestoes, POST apply
+  // (preview sem confirm, aplica com confirm=true + trava de preview no backend).
+  // Shape interno de resumo/rules/sugestoes NAO e garantido -> normalizadores
+  // defensivos via pick()/extractRows(), mesmo padrao do dashboard de operacao.
+
+  var dashSubtabs = $('#dash-subtabs');
+  var dashViewOperacao = $('#dash-view-operacao');
+  var dashViewFloors = $('#dash-view-floors');
+
+  var floorsNetworkInput = $('#floors-network');
+  var floorsDomainInput = $('#floors-domain');
+  var floorsLoadBtn = $('#floors-load-btn');
+  var floorsLoadSpinner = $('#floors-load-spinner');
+  var floorsSuggestBtn = $('#floors-suggest-btn');
+  var floorsSuggestSpinner = $('#floors-suggest-spinner');
+  var floorsStatusEl = $('#floors-status');
+  var floorsErrorBadge = $('#floors-error-badge');
+  var floorsSuggestionsSection = $('#floors-suggestions-section');
+  var floorsSuggestionsBody = $('#floors-suggestions-body');
+  var floorsTbody = $('#floors-tbody');
+  var floorsReviewBtn = $('#floors-review-btn');
+  var floorsReviewCount = $('#floors-review-count');
+
+  var floorsModalOverlay = $('#floors-modal-overlay');
+  var floorsModalDiff = $('#floors-modal-diff');
+  var floorsModalStatus = $('#floors-modal-status');
+  var floorsModalCancel = $('#floors-modal-cancel');
+  var floorsModalConfirm = $('#floors-modal-confirm');
+  var floorsModalSpinner = $('#floors-modal-spinner');
+
+  var floorsState = {
+    network: '',
+    domain: '',
+    resumoRaw: null,
+    rows: [], // [{key, raw, floor, ecpm, revenue, impressions, matchRate, desiredMatchRate, country, device, enabled}]
+    modified: {}, // key -> novo valor de floor (numero)
+    suggestions: [],
+    busy: false, // qualquer request de apply (preview ou confirm) em voo
+    pendingKeys: null, // ordem dos keys enviados no ultimo preview
+    pendingRules: null, // rules[] enviado no ultimo preview (reusado no confirm)
+    pending: null // snapshot congelado do preview {network, domain, rules, keys} p/ o confirm
+  };
+
+  var MATCH_RATE_PROBLEM_THRESHOLD = 15; // pontos percentuais de diferenca p/ marcar como problematica
+
+  function initFloorsAvailability() {
+    if (!dashSubtabs) return;
+    var hasRuler = !!(state.config && state.config.rulerToken);
+    dashSubtabs.classList.toggle('hidden', !hasRuler);
+    if (!hasRuler) { setDashView('operacao'); }
+
+    var saved = lsGet(LS_FLOORS);
+    if (saved) {
+      if (floorsNetworkInput && saved.network) floorsNetworkInput.value = saved.network;
+      if (floorsDomainInput && saved.domain) floorsDomainInput.value = saved.domain;
+    }
+  }
+
+  function setDashView(view) {
+    if (dashSubtabs) {
+      $all('.dash-subtab', dashSubtabs).forEach(function (b) {
+        var active = b.getAttribute('data-dashview') === view;
+        b.classList.toggle('active', active);
+        b.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
+    }
+    if (dashViewOperacao) dashViewOperacao.classList.toggle('hidden', view !== 'operacao');
+    if (dashViewFloors) dashViewFloors.classList.toggle('hidden', view !== 'floors');
+  }
+
+  if (dashSubtabs) {
+    dashSubtabs.addEventListener('click', function (e) {
+      var btn = e.target.closest('.dash-subtab');
+      if (!btn) return;
+      setDashView(btn.getAttribute('data-dashview'));
+    });
+  }
+
+  // ---- normalizers (defensivos - shape de resumo_floors/listar_price_rules/sugerir_floor nao e garantido) ----
+
+  function normalizeMatchRateValue(n) {
+    var v = toNumber(n);
+    if (v === null) return null;
+    // algumas fontes trazem fracao (0-1), outras ja em pontos percentuais (0-100).
+    return Math.abs(v) <= 1 ? v * 100 : v;
+  }
+
+  function normalizeFloorRow(raw, idx) {
+    var floor = toNumber(pick(raw, ['rule', 'floor', 'floor_price', 'price_floor', 'valor']));
+    var ecpm = toNumber(pick(raw, ['eCPM', 'ecpm', 'cpm']));
+    var revenue = toNumber(pick(raw, ['revenue', 'receita']));
+    var impressions = toNumber(pick(raw, ['impressions', 'impressoes', 'impressões', 'imps', 'item_level_impressions']));
+    var matchRate = normalizeMatchRateValue(pick(raw, ['match_rate', 'matchRate']));
+    var desiredMatchRate = normalizeMatchRateValue(pick(raw, ['desired_match_rate', 'desiredMatchRate']));
+    var country = pick(raw, ['country', 'pais', 'país']);
+    var device = pick(raw, ['device']);
+    var enabledRaw = pick(raw, ['enabled', 'ativo', 'active']);
+    var enabled = enabledRaw === undefined ? null : !!enabledRaw;
+    return {
+      key: 'r' + idx,
+      raw: raw,
+      floor: floor,
+      ecpm: ecpm,
+      revenue: revenue,
+      impressions: impressions,
+      matchRate: matchRate,
+      desiredMatchRate: desiredMatchRate,
+      country: country,
+      device: device,
+      enabled: enabled
+    };
+  }
+
+  function isFloorRowProblematic(row) {
+    if (row.matchRate !== null && row.desiredMatchRate !== null) {
+      if (Math.abs(row.matchRate - row.desiredMatchRate) >= MATCH_RATE_PROBLEM_THRESHOLD) return true;
+    }
+    if (row.revenue === 0 && row.impressions !== null && row.impressions > 0) return true;
+    return false;
+  }
+
+  function normalizeFloorsResumo(resumoPayload) {
+    if (!resumoPayload) return null;
+    var data = resumoPayload.data !== undefined ? resumoPayload.data : resumoPayload;
+    if (!data || typeof data !== 'object') return null;
+    var revenue = toNumber(pick(data, ['revenue', 'revenue_total', 'receita', 'receita_total']));
+    var ecpmMedio = toNumber(pick(data, ['ecpm_medio', 'ecpm_ponderado', 'ecpm', 'eCPM', 'avg_ecpm']));
+    var regrasAtivas = toNumber(pick(data, ['regras_ativas', 'active_rules', 'ativas', 'rules_ativas', 'count_ativas']));
+    var problematicasRaw = pick(data, ['regras_problematicas', 'problematic_rules', 'problematicas']);
+    var problematicasCount = null;
+    if (Array.isArray(problematicasRaw)) problematicasCount = problematicasRaw.length;
+    else if (problematicasRaw !== undefined) problematicasCount = toNumber(problematicasRaw);
+    return { revenue: revenue, ecpmMedio: ecpmMedio, regrasAtivas: regrasAtivas, problematicasCount: problematicasCount };
+  }
+
+  function normalizeSuggestion(item) {
+    var alvo = pick(item, ['regra', 'rule', 'target', 'regra_alvo', 'nome']);
+    var floorAtual = toNumber(pick(item, ['floor_atual', 'current_floor', 'floor', 'rule_atual']));
+    var floorSugerido = toNumber(pick(item, ['floor_sugerido', 'suggested_floor', 'novo_floor', 'new_floor']));
+    var direcao = pick(item, ['direcao', 'direction', 'acao', 'action']);
+    var justificativa = pick(item, ['justificativa', 'reason', 'motivo', 'explanation']);
+    var confianca = pick(item, ['confianca', 'confidence', 'score']);
+    var country = pick(item, ['country', 'pais', 'país']);
+    var device = pick(item, ['device']);
+    return {
+      raw: item, alvo: alvo, floorAtual: floorAtual, floorSugerido: floorSugerido,
+      direcao: direcao, justificativa: justificativa, confianca: confianca, country: country, device: device
+    };
+  }
+
+  function describeRowIdentity(row) {
+    var parts = [];
+    if (row.country) parts.push(row.country);
+    if (row.device) parts.push(row.device);
+    var uri = pick(row.raw, ['request_uri', 'uri', 'path']);
+    if (uri) parts.push(uri);
+    var adUnit = pick(row.raw, ['ad_unit', 'adUnit']);
+    if (adUnit) parts.push(adUnit);
+    return parts.length ? parts.join(' · ') : ('regra ' + row.key);
+  }
+
+  function findFloorsRow(key) {
+    for (var i = 0; i < floorsState.rows.length; i++) {
+      if (floorsState.rows[i].key === key) return floorsState.rows[i];
+    }
+    return null;
+  }
+
+  function matchSuggestionToRowKey(s) {
+    var rows = floorsState.rows;
+    if (!rows.length) return null;
+    var bestKey = null, bestScore = 0;
+    rows.forEach(function (r) {
+      var score = 0;
+      if (s.country && r.country && String(s.country).toLowerCase() === String(r.country).toLowerCase()) score++;
+      if (s.device && r.device && String(s.device).toLowerCase() === String(r.device).toLowerCase()) score++;
+      if (s.floorAtual !== null && r.floor !== null && Math.abs(s.floorAtual - r.floor) < 0.001) score++;
+      if (score > bestScore) { bestScore = score; bestKey = r.key; }
+    });
+    return bestScore >= 1 ? bestKey : null;
+  }
+
+  // ---- rendering ----
+
+  function renderFloorsCards(resumoNorm) {
+    var revenueEl = $('#floors-metric-revenue');
+    var ecpmEl = $('#floors-metric-ecpm');
+    var ativasEl = $('#floors-metric-ativas');
+    var probEl = $('#floors-metric-problematicas');
+    var probCard = $('#floors-card-problematicas');
+    if (!revenueEl) return;
+
+    var revenue = resumoNorm ? resumoNorm.revenue : null;
+    var ecpm = resumoNorm ? resumoNorm.ecpmMedio : null;
+    var ativas = resumoNorm && resumoNorm.regrasAtivas !== null && resumoNorm.regrasAtivas !== undefined ? resumoNorm.regrasAtivas : null;
+    var problematicas = resumoNorm && resumoNorm.problematicasCount !== null && resumoNorm.problematicasCount !== undefined ? resumoNorm.problematicasCount : null;
+
+    if ((ativas === null || ativas === undefined) && floorsState.rows.length) {
+      ativas = floorsState.rows.filter(function (r) { return r.enabled !== false; }).length;
+    }
+    if ((problematicas === null || problematicas === undefined) && floorsState.rows.length) {
+      problematicas = floorsState.rows.filter(isFloorRowProblematic).length;
+    }
+
+    revenueEl.textContent = formatCurrencyUSD(revenue);
+    ecpmEl.textContent = formatEcpm(ecpm);
+    ativasEl.textContent = (ativas === null || ativas === undefined) ? '—' : String(ativas);
+    probEl.textContent = (problematicas === null || problematicas === undefined) ? '—' : String(problematicas);
+
+    var hasProblems = problematicas !== null && problematicas !== undefined && problematicas > 0;
+    if (probCard) probCard.classList.toggle('metric-card-alert', hasProblems);
+  }
+
+  function renderFloorsTable() {
+    if (!floorsTbody) return;
+    floorsTbody.innerHTML = '';
+    if (!floorsState.rows.length) {
+      var tr0 = document.createElement('tr');
+      tr0.className = 'empty-row';
+      tr0.innerHTML = '<td colspan="8">sem regras pra este network + domain</td>';
+      floorsTbody.appendChild(tr0);
+      return;
+    }
+
+    floorsState.rows.forEach(function (r) {
+      var tr = document.createElement('tr');
+      tr.setAttribute('data-key', r.key);
+      if (isFloorRowProblematic(r)) tr.classList.add('floor-row-problematic');
+      if (floorsState.modified.hasOwnProperty(r.key)) tr.classList.add('floor-row-modified');
+
+      var floorValue = floorsState.modified.hasOwnProperty(r.key) ? floorsState.modified[r.key] : r.floor;
+      var floorAttr = (floorValue === null || floorValue === undefined || isNaN(floorValue)) ? '' : floorValue;
+      var statusHtml = r.enabled === null ? '—' : (r.enabled ? '<span class="pill-value positive">ON</span>' : '<span class="pill-value neutral">OFF</span>');
+
+      tr.innerHTML =
+        '<td><input type="number" step="0.01" class="floor-input" id="floor-input-' + r.key + '" data-key="' + r.key + '" value="' + floorAttr + '" aria-label="Floor da regra ' + escapeHtml(describeRowIdentity(r)) + '" /></td>' +
+        '<td>' + formatEcpm(r.ecpm) + '</td>' +
+        '<td>' + formatCurrencyUSD(r.revenue) + '</td>' +
+        '<td>' + formatIntBR(r.impressions) + '</td>' +
+        '<td>' + formatPct1(r.matchRate) + ' / ' + formatPct1(r.desiredMatchRate) + '</td>' +
+        '<td>' + (r.country ? escapeHtml(String(r.country)) : '—') + '</td>' +
+        '<td>' + (r.device ? escapeHtml(String(r.device)) : '—') + '</td>' +
+        '<td>' + statusHtml + '</td>';
+      floorsTbody.appendChild(tr);
+    });
+  }
+
+  function updateFloorsReviewButton() {
+    if (!floorsReviewBtn) return;
+    var count = Object.keys(floorsState.modified).length;
+    if (floorsReviewCount) floorsReviewCount.textContent = String(count);
+    floorsReviewBtn.classList.toggle('hidden', count === 0);
+  }
+
+  function renderFloorsSuggestions() {
+    if (!floorsSuggestionsSection || !floorsSuggestionsBody) return;
+    var list = floorsState.suggestions || [];
+    if (!list.length) {
+      floorsSuggestionsSection.classList.add('hidden');
+      floorsSuggestionsBody.innerHTML = '';
+      return;
+    }
+    floorsSuggestionsSection.classList.remove('hidden');
+    floorsSuggestionsBody.innerHTML = '';
+    list.forEach(function (s, idx) {
+      var matchKey = matchSuggestionToRowKey(s);
+      var dirText = s.direcao ? String(s.direcao) : '—';
+      var dirClass = /sob|subir|up/i.test(dirText) ? 'positive' : /desc|descer|down/i.test(dirText) ? 'negative' : 'neutral';
+      var label = s.alvo ? String(s.alvo) : ([s.country, s.device].filter(Boolean).join(' · ') || ('sugestão ' + (idx + 1)));
+
+      var card = document.createElement('div');
+      card.className = 'suggestion-item';
+      card.innerHTML =
+        '<div class="suggestion-head">' +
+          '<span class="pill-value ' + dirClass + '">' + escapeHtml(dirText) + '</span>' +
+          '<span class="suggestion-target">' + escapeHtml(label) + '</span>' +
+        '</div>' +
+        '<div class="suggestion-body"><span class="floor-diff-values">' + formatFloorNum(s.floorAtual) + ' <span class="floor-diff-arrow">&rarr;</span> <span class="floor-diff-new">' + formatFloorNum(s.floorSugerido) + '</span></span>' +
+        (s.confianca !== undefined && s.confianca !== null && s.confianca !== '' ? ' <span class="dim">// confiança: ' + escapeHtml(String(s.confianca)) + '</span>' : '') +
+        '</div>' +
+        (s.justificativa ? '<div class="suggestion-justif">' + escapeHtml(String(s.justificativa)) + '</div>' : '') +
+        (matchKey && s.floorSugerido !== null && s.floorSugerido !== undefined
+          ? '<button type="button" class="suggestion-apply-btn" data-key="' + matchKey + '" data-floor="' + s.floorSugerido + '">aplicar sugestão</button>'
+          : '<span class="dim suggestion-no-match">regra correspondente não encontrada na tabela</span>');
+      floorsSuggestionsBody.appendChild(card);
+    });
+  }
+
+  if (floorsSuggestionsBody) {
+    floorsSuggestionsBody.addEventListener('click', function (e) {
+      var btn = e.target.closest('.suggestion-apply-btn');
+      if (!btn) return;
+      var key = btn.getAttribute('data-key');
+      var floor = parseFloat(btn.getAttribute('data-floor'));
+      if (!key || isNaN(floor)) return;
+      var input = document.getElementById('floor-input-' + key);
+      if (!input) return;
+      input.value = floor;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      input.focus();
+    });
+  }
+
+  if (floorsTbody) {
+    floorsTbody.addEventListener('input', function (e) {
+      var input = e.target.closest('.floor-input');
+      if (!input) return;
+      var key = input.getAttribute('data-key');
+      var row = findFloorsRow(key);
+      if (!row) return;
+      var tr = input.closest('tr');
+      var raw = input.value.trim();
+
+      if (raw === '') {
+        delete floorsState.modified[key];
+        if (tr) tr.classList.remove('floor-row-modified');
+        updateFloorsReviewButton();
+        return;
+      }
+      var newVal = parseFloat(raw);
+      if (isNaN(newVal)) return; // digitacao incompleta (ex.: "-", ".") - espera valor valido
+
+      var changed = (row.floor === null || row.floor === undefined) ? true : (newVal !== row.floor);
+      if (changed) {
+        floorsState.modified[key] = newVal;
+        if (tr) tr.classList.add('floor-row-modified');
+      } else {
+        delete floorsState.modified[key];
+        if (tr) tr.classList.remove('floor-row-modified');
+      }
+      updateFloorsReviewButton();
+    });
+  }
+
+  // ---- errors / status ----
+
+  function showFloorsError(msg) {
+    if (!floorsErrorBadge) return;
+    floorsErrorBadge.textContent = msg;
+    floorsErrorBadge.title = msg;
+    floorsErrorBadge.classList.remove('hidden');
+  }
+  function hideFloorsError() {
+    if (floorsErrorBadge) floorsErrorBadge.classList.add('hidden');
+  }
+  function setFloorsStatusText(msg) {
+    if (floorsStatusEl) floorsStatusEl.textContent = msg;
+  }
+  function handleFloorsLoadError(res, json) {
+    // av_bearer ausente e a causa mais provavel de falha nas tools de floor
+    // (elas exigem essa credencial) - orienta direto pra correcao, mesmo sem
+    // certeza absoluta de que foi essa a causa do erro especifico.
+    if (!state.config.avBearer) {
+      showFloorsError('configure a key da ActiveView em trocar config');
+      return;
+    }
+    var msg = (json && json.error) ? json.error : ('HTTP ' + res.status);
+    if (res.status === 401) msg = 'key inválida (ruler-mcp ou av_bearer) — ' + msg;
+    showFloorsError(msg);
+  }
+
+  // ---- data fetch ----
+
+  function setFloorsLoading(loading) {
+    if (floorsLoadBtn) floorsLoadBtn.disabled = loading;
+    if (floorsLoadSpinner) floorsLoadSpinner.classList.toggle('hidden', !loading);
+  }
+  function setFloorsSuggestLoading(loading) {
+    if (floorsSuggestBtn) floorsSuggestBtn.disabled = loading || !floorsState.network || !floorsState.domain;
+    if (floorsSuggestSpinner) floorsSuggestSpinner.classList.toggle('hidden', !loading);
+  }
+
+  function applyFloorsPayload(json) {
+    var rulesData = json.rules ? (json.rules.data !== undefined ? json.rules.data : json.rules) : null;
+    var rawRows = extractRows(rulesData);
+    floorsState.rows = rawRows.map(normalizeFloorRow);
+    floorsState.resumoRaw = json.resumo || null;
+    renderFloorsCards(normalizeFloorsResumo(floorsState.resumoRaw));
+    renderFloorsTable();
+    updateFloorsReviewButton();
+  }
+
+  async function loadFloorsRules(network, domain) {
+    if (!state.config || !state.config.rulerToken) return;
+    setFloorsLoading(true);
+    hideFloorsError();
+    setFloorsStatusText('carregando...');
+    try {
+      var body = { rulerToken: state.config.rulerToken, avBearer: state.config.avBearer, network: network, domain: domain };
+      var res = await fetch('/api/ruler/rules', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      var json = null;
+      try { json = await res.json(); } catch (e) { json = null; }
+
+      if (res.ok && json && json.ok) {
+        floorsState.network = network;
+        floorsState.domain = domain;
+        floorsState.modified = {};
+        applyFloorsPayload(json);
+        setFloorsStatusText(network + ' · ' + domain);
+        if (json.errors && json.errors.length) {
+          showFloorsError('parcial: ' + json.errors.map(function (e) { return e.tool + ': ' + e.error; }).join(' | '));
+        }
+        if (floorsSuggestBtn) floorsSuggestBtn.disabled = false;
+      } else {
+        setFloorsStatusText('sem dados');
+        handleFloorsLoadError(res, json);
+      }
+    } catch (e) {
+      setFloorsStatusText('sem dados');
+      showFloorsError('falha de rede');
+    } finally {
+      setFloorsLoading(false);
+    }
+  }
+
+  if (floorsLoadBtn) {
+    floorsLoadBtn.addEventListener('click', function () {
+      var network = floorsNetworkInput ? floorsNetworkInput.value.trim() : '';
+      var domain = floorsDomainInput ? floorsDomainInput.value.trim() : '';
+      if (!network || !domain) { showFloorsError('informe network e domain'); return; }
+      lsSet(LS_FLOORS, { network: network, domain: domain });
+      loadFloorsRules(network, domain);
+    });
+  }
+  [floorsNetworkInput, floorsDomainInput].forEach(function (inp) {
+    if (!inp) return;
+    inp.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); floorsLoadBtn && floorsLoadBtn.click(); }
+    });
+  });
+
+  if (floorsSuggestBtn) {
+    floorsSuggestBtn.addEventListener('click', async function () {
+      if (!floorsState.network || !floorsState.domain) return;
+      setFloorsSuggestLoading(true);
+      try {
+        var body = { rulerToken: state.config.rulerToken, avBearer: state.config.avBearer, network: floorsState.network, domain: floorsState.domain };
+        var res = await fetch('/api/ruler/sugestoes', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        var json = null;
+        try { json = await res.json(); } catch (e) { json = null; }
+        if (res.ok && json && json.ok) {
+          applyFloorsSuggestionsPayload(json.data);
+        } else {
+          showToast((json && json.error) || ('falha ao buscar sugestões (HTTP ' + res.status + ')'), 'error');
+        }
+      } catch (e) {
+        showToast('falha de rede ao buscar sugestões', 'error');
+      } finally {
+        setFloorsSuggestLoading(false);
+      }
+    });
+  }
+
+  function applyFloorsSuggestionsPayload(rawData) {
+    var data = rawData ? (rawData.data !== undefined ? rawData.data : rawData) : null;
+    var items = extractRows(data);
+    floorsState.suggestions = items.map(normalizeSuggestion);
+    renderFloorsSuggestions();
+  }
+
+  // ---- apply flow (preview -> modal -> confirm) ----
+
+  function setFloorsApplyBusy(busy) {
+    floorsState.busy = busy;
+    if (floorsReviewBtn) floorsReviewBtn.disabled = busy;
+    if (floorsModalConfirm) floorsModalConfirm.disabled = busy;
+    if (floorsModalCancel) floorsModalCancel.disabled = busy;
+    if (floorsModalSpinner) floorsModalSpinner.classList.toggle('hidden', !busy);
+  }
+
+  function renderDefensiveJson(value, depth) {
+    depth = depth || 0;
+    if (value === null || value === undefined) return '<span class="dim">—</span>';
+    if (typeof value !== 'object') return escapeHtml(String(value));
+    if (depth >= 3) return '<span class="dim">…</span>';
+    if (Array.isArray(value)) {
+      if (!value.length) return '<span class="dim">[]</span>';
+      var items = value.slice(0, 20).map(function (v) { return '<li>' + renderDefensiveJson(v, depth + 1) + '</li>'; }).join('');
+      var extra = value.length > 20 ? '<li class="dim">+ ' + (value.length - 20) + ' itens</li>' : '';
+      return '<ul class="json-dump-list">' + items + extra + '</ul>';
+    }
+    var keys = Object.keys(value);
+    if (!keys.length) return '<span class="dim">{}</span>';
+    var rows = keys.slice(0, 30).map(function (k) {
+      return '<li><span class="json-dump-key">' + escapeHtml(k) + ':</span> ' + renderDefensiveJson(value[k], depth + 1) + '</li>';
+    }).join('');
+    return '<ul class="json-dump-list">' + rows + '</ul>';
+  }
+
+  function buildFloorsDiffHtml(previewData) {
+    var html = '<div class="floor-diff-list">';
+    (floorsState.pendingKeys || []).forEach(function (key, i) {
+      var row = findFloorsRow(key);
+      var newFloor = floorsState.modified[key];
+      var label = row ? describeRowIdentity(row) : ('regra ' + (i + 1));
+      html += '<div class="floor-diff-row"><span class="floor-diff-label">' + escapeHtml(label) + '</span>' +
+        '<span class="floor-diff-values">' + formatFloorNum(row ? row.floor : null) + ' <span class="floor-diff-arrow">&rarr;</span> <span class="floor-diff-new">' + formatFloorNum(newFloor) + '</span></span></div>';
+    });
+    html += '</div>';
+    if (previewData !== null && previewData !== undefined) {
+      html += '<div class="floor-diff-raw"><div class="floor-diff-raw-title dim">// resposta do preview</div>' + renderDefensiveJson(previewData, 0) + '</div>';
+    }
+    return html;
+  }
+
+  function openFloorsModal() {
+    if (floorsModalOverlay) floorsModalOverlay.classList.remove('hidden');
+    if (floorsModalConfirm) floorsModalConfirm.focus();
+  }
+  function closeFloorsModal() {
+    if (floorsModalOverlay) floorsModalOverlay.classList.add('hidden');
+    if (floorsModalStatus) { floorsModalStatus.textContent = ''; floorsModalStatus.className = 'ob-status'; }
+  }
+
+  async function openFloorsPreview() {
+    var keys = Object.keys(floorsState.modified);
+    if (!keys.length || floorsState.busy) return;
+
+    var rulesPayload = [];
+    keys.forEach(function (key) {
+      var row = findFloorsRow(key);
+      // B2: sem a regra original não temos os identificadores (country/device/uri…)
+      // pra mirar o upsert — NÃO envia uma regra sem identidade (evita catch-all).
+      if (!row || !row.raw) return;
+      var newFloor = floorsState.modified[key];
+      var merged = Object.assign({}, row.raw);
+      merged.rule = newFloor;
+      if (merged.floor !== undefined) merged.floor = newFloor;
+      rulesPayload.push(merged);
+    });
+    if (!rulesPayload.length) {
+      showToast('não consegui montar as alterações (regras sem identificador)', 'error');
+      return;
+    }
+
+    // M1: CONGELA network/domain + rules no instante do preview. O confirm usa
+    // ESTE snapshot — um evento tooldata do chat pode mexer em floorsState.network
+    // com o modal aberto, mas o que será aplicado é exatamente o que foi previsto.
+    floorsState.pending = {
+      network: floorsState.network,
+      domain: floorsState.domain,
+      rules: rulesPayload,
+      keys: keys.slice(),
+    };
+    floorsState.pendingRules = rulesPayload; // compat com checagens existentes
+
+    setFloorsApplyBusy(true);
+    try {
+      var body = {
+        rulerToken: state.config.rulerToken, avBearer: state.config.avBearer,
+        network: floorsState.pending.network, domain: floorsState.pending.domain, rules: rulesPayload
+      };
+      var res = await fetch('/api/ruler/apply', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      });
+      var json = null;
+      try { json = await res.json(); } catch (e) { json = null; }
+
+      if (res.ok && json && json.ok && json.mode === 'preview') {
+        if (floorsModalDiff) floorsModalDiff.innerHTML = buildFloorsDiffHtml(json.data);
+        openFloorsModal();
+      } else if (res.status === 409) {
+        showToast('preview expirou, revise as alterações de novo', 'warn');
+      } else {
+        showToast((json && json.error) || 'falha ao gerar preview das alterações', 'error');
+      }
+    } catch (e) {
+      showToast('falha de rede ao gerar preview', 'error');
+    } finally {
+      setFloorsApplyBusy(false);
+    }
+  }
+
+  if (floorsReviewBtn) {
+    floorsReviewBtn.addEventListener('click', openFloorsPreview);
+  }
+
+  if (floorsModalCancel) {
+    floorsModalCancel.addEventListener('click', function () {
+      if (floorsState.busy) return;
+      closeFloorsModal();
+    });
+  }
+
+  if (floorsModalOverlay) {
+    floorsModalOverlay.addEventListener('click', function (e) {
+      if (e.target === floorsModalOverlay && !floorsState.busy) closeFloorsModal();
+    });
+  }
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && floorsModalOverlay && !floorsModalOverlay.classList.contains('hidden') && !floorsState.busy) {
+      closeFloorsModal();
+    }
+  });
+
+  if (floorsModalConfirm) {
+    floorsModalConfirm.addEventListener('click', async function () {
+      var pend = floorsState.pending;
+      if (floorsState.busy || !pend || !pend.rules) return;
+      setFloorsApplyBusy(true);
+      try {
+        // Usa o SNAPSHOT do preview (M1): mesmo network/domain/rules previstos,
+        // não os valores vivos do floorsState (que o chat pode ter trocado).
+        var body = {
+          rulerToken: state.config.rulerToken, avBearer: state.config.avBearer,
+          network: pend.network, domain: pend.domain,
+          rules: pend.rules, confirm: true, managerName: state.config.name
+        };
+        var res = await fetch('/api/ruler/apply', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+        });
+        var json = null;
+        try { json = await res.json(); } catch (e) { json = null; }
+
+        if (res.ok && json && json.ok && json.mode === 'applied') {
+          closeFloorsModal();
+          showToast('floors aplicados', 'success');
+          floorsState.modified = {};
+          floorsState.pendingKeys = null;
+          floorsState.pendingRules = null;
+          floorsState.pending = null;
+          await loadFloorsRules(pend.network, pend.domain);
+        } else if (res.status === 409) {
+          if (floorsModalStatus) {
+            floorsModalStatus.textContent = 'preview expirou, revise de novo.';
+            floorsModalStatus.className = 'ob-status error';
+          }
+          closeFloorsModal();
+          showToast('preview expirou, revise as alterações de novo', 'warn');
+        } else {
+          if (floorsModalStatus) {
+            floorsModalStatus.textContent = (json && json.error) || 'falha ao aplicar floors.';
+            floorsModalStatus.className = 'ob-status error';
+          }
+        }
+      } catch (e) {
+        if (floorsModalStatus) {
+          floorsModalStatus.textContent = 'falha de rede ao aplicar.';
+          floorsModalStatus.className = 'ob-status error';
+        }
+      } finally {
+        setFloorsApplyBusy(false);
+      }
+    });
+  }
+
+  // ---- auto-open via chat (evento SSE `tooldata`) ----
+
+  function handleFloorsToolData(data) {
+    if (!data || !data.name) return;
+    if (dashSubtabs && dashSubtabs.classList.contains('hidden')) dashSubtabs.classList.remove('hidden');
+    setDashView('floors');
+
+    if (data.network && floorsNetworkInput) floorsNetworkInput.value = data.network;
+    if (data.domain && floorsDomainInput) floorsDomainInput.value = data.domain;
+    if (data.network && data.domain) {
+      floorsState.network = data.network;
+      floorsState.domain = data.domain;
+      lsSet(LS_FLOORS, { network: data.network, domain: data.domain });
+    }
+
+    var result = data.result;
+    if (data.name === 'listar_price_rules') {
+      var rulesData = result ? (result.data !== undefined ? result.data : result) : null;
+      floorsState.rows = extractRows(rulesData).map(normalizeFloorRow);
+      floorsState.modified = {};
+      renderFloorsTable();
+      renderFloorsCards(normalizeFloorsResumo(floorsState.resumoRaw));
+      updateFloorsReviewButton();
+      if (floorsSuggestBtn) floorsSuggestBtn.disabled = false;
+      setFloorsStatusText((data.network || floorsState.network) + ' · ' + (data.domain || floorsState.domain));
+    } else if (data.name === 'resumo_floors') {
+      floorsState.resumoRaw = result;
+      renderFloorsCards(normalizeFloorsResumo(result));
+      if (floorsSuggestBtn) floorsSuggestBtn.disabled = false;
+      setFloorsStatusText((data.network || floorsState.network) + ' · ' + (data.domain || floorsState.domain));
+    } else if (data.name === 'sugerir_floor') {
+      applyFloorsSuggestionsPayload(result);
+    } else if (data.name === 'aplicar_floor') {
+      // nao abre modal (a aplicacao ja aconteceu via chat) - so reflete o estado novo.
+      if (floorsState.network && floorsState.domain) {
+        loadFloorsRules(floorsState.network, floorsState.domain);
+      }
+    }
+  }
+
   /* ============================== 9. MOBILE TABS ============================== */
 
   var splitView = $('#split-view');
@@ -1286,6 +2021,10 @@
     setRulerConnStatus(state.config.rulerToken ? 'ok' : 'unset');
     var rulerChip = $('#chip-ruler-floors');
     if (rulerChip) rulerChip.classList.toggle('hidden', !state.config.rulerToken);
+
+    // aba FLOORS do dashboard so existe pro gestor com rulerToken configurado -
+    // sem isso, nem o switch OPERACAO|FLOORS aparece (dashboard fica identico ao de hoje).
+    initFloorsAvailability();
 
     // chat history
     if (!isFreshOnboarding) {

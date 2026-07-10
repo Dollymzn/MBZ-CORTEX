@@ -254,6 +254,13 @@
     <!-- ============================== DASHBOARD PANEL ============================== -->
     <section class="dashboard-panel" id="panel-dashboard" aria-label="Dashboard da operação">
 
+      <div class="dash-subtabs hidden" id="dash-subtabs" role="tablist" aria-label="Modo do dashboard">
+        <button type="button" class="dash-subtab active" data-dashview="operacao" role="tab" aria-selected="true">OPERAÇÃO</button>
+        <button type="button" class="dash-subtab" data-dashview="floors" role="tab" aria-selected="false">FLOORS</button>
+      </div>
+
+      <div class="dash-view" id="dash-view-operacao">
+
       <div class="dash-toolbar">
         <div class="period-pills" id="period-pills" role="tablist" aria-label="Período">
           <button type="button" class="pill active" data-period="hoje" role="tab" aria-selected="true">HOJE</button>
@@ -318,8 +325,110 @@
         </div>
       </div>
 
+      </div><!-- /#dash-view-operacao -->
+
+      <!-- ============================== FLOORS VIEW (price rules ActiveView) ============================== -->
+      <div class="dash-view hidden" id="dash-view-floors">
+
+        <div class="floors-loadbar">
+          <div class="field-inline">
+            <label for="floors-network">Network</label>
+            <input id="floors-network" type="text" placeholder="ex: adx" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="field-inline">
+            <label for="floors-domain">Domain</label>
+            <input id="floors-domain" type="text" placeholder="ex: blog.miawzy.com" autocomplete="off" spellcheck="false" />
+          </div>
+          <button type="button" id="floors-load-btn" class="btn-refresh">
+            <span class="btn-label">CARREGAR</span>
+            <span class="spinner hidden" id="floors-load-spinner" aria-hidden="true"></span>
+          </button>
+          <button type="button" id="floors-suggest-btn" class="btn-ghost" disabled>
+            <span class="btn-label">SUGESTÕES</span>
+            <span class="spinner hidden" id="floors-suggest-spinner" aria-hidden="true"></span>
+          </button>
+        </div>
+
+        <div class="dash-meta">
+          <span id="floors-status" class="snapshot-age">sem dados</span>
+          <span id="floors-error-badge" class="badge-warn hidden" tabindex="0"></span>
+        </div>
+
+        <div class="metric-cards" id="floors-metric-cards">
+          <div class="metric-card" data-metric="revenue">
+            <div class="metric-card-top bar-cyan"></div>
+            <div class="metric-label">REVENUE</div>
+            <div class="metric-value" id="floors-metric-revenue">—</div>
+          </div>
+          <div class="metric-card" data-metric="ecpm">
+            <div class="metric-card-top bar-purple"></div>
+            <div class="metric-label">eCPM MÉDIO</div>
+            <div class="metric-value" id="floors-metric-ecpm">—</div>
+          </div>
+          <div class="metric-card" data-metric="ativas">
+            <div class="metric-card-top bar-green"></div>
+            <div class="metric-label">REGRAS ATIVAS</div>
+            <div class="metric-value" id="floors-metric-ativas">—</div>
+          </div>
+          <div class="metric-card" data-metric="problematicas" id="floors-card-problematicas">
+            <div class="metric-card-top bar-pink"></div>
+            <div class="metric-label">PROBLEMÁTICAS</div>
+            <div class="metric-value" id="floors-metric-problematicas">—</div>
+          </div>
+        </div>
+
+        <div class="dash-section hidden" id="floors-suggestions-section">
+          <h2 class="section-title">SUGESTÕES <span class="dim">// sugerir_floor</span></h2>
+          <div id="floors-suggestions-body" class="suggestions-body"></div>
+        </div>
+
+        <div class="dash-section floors-table-section">
+          <h2 class="section-title">REGRAS <span class="dim">// price rules</span></h2>
+          <div class="table-wrap floors-table-wrap">
+            <table id="floors-table">
+              <thead>
+                <tr>
+                  <th>Floor</th><th>eCPM</th><th>Revenue</th><th>Impr.</th><th>Match% / Desejado%</th><th>País</th><th>Device</th><th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="floors-tbody">
+                <tr class="empty-row"><td colspan="8">carregue um network + domain pra ver as regras</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <button type="button" id="floors-review-btn" class="btn-primary floors-floating-btn hidden">
+          <span class="btn-label">REVISAR ALTERAÇÕES (<span id="floors-review-count">0</span>)</span>
+        </button>
+
+      </div><!-- /#dash-view-floors -->
+
     </section>
   </main>
+
+  <!-- ============================== FLOORS APPLY MODAL ============================== -->
+  <div class="overlay hidden" id="floors-modal-overlay">
+    <div class="floors-modal" role="dialog" aria-modal="true" aria-labelledby="floors-modal-title">
+      <div class="modal-topbar"></div>
+      <div class="floors-modal-body">
+        <h2 class="section-title" id="floors-modal-title">REVISAR ALTERAÇÕES DE FLOOR</h2>
+        <div id="floors-modal-diff" class="floors-modal-diff"></div>
+        <div id="floors-modal-status" class="ob-status" role="status" aria-live="polite"></div>
+        <div class="floors-modal-actions">
+          <button type="button" id="floors-modal-cancel" class="btn-ghost">CANCELAR</button>
+          <button type="button" id="floors-modal-confirm" class="btn-primary">
+            <span class="btn-label">CONFIRMAR E APLICAR</span>
+            <span class="spinner hidden" id="floors-modal-spinner" aria-hidden="true"></span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================== TOASTS ============================== -->
+  <div class="toast-container" id="toast-container" aria-live="polite" aria-atomic="false"></div>
+
 </div>
 
 <script src="app.js"></script>

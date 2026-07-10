@@ -23,7 +23,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { listTools, callTool, McpAuthError } from './moodlr.js';
-import { listRulerTools } from './ruler.js';
+import { listRulerTools, callRulerTool } from './ruler.js';
+import { guardedApplyFloor, redactSecrets } from './floor-guard.js';
 import { runAgentStream } from './agent.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -123,6 +124,7 @@ app.post('/api/snapshot', async (req, res) => {
     ['resumoUsuarios', 'resumo_usuarios', () => callTool('resumo_usuarios', { start_date, end_date }, token)],
     ['saudeContasFb', 'saude_contas_fb', () => callTool('saude_contas_fb', {}, token)],
     ['fadigaCriativo', 'fadiga_criativo', () => callTool('fadiga_criativo', {}, token)],
+    ['adsetsPausados', 'adsets_pausados', () => callTool('adsets_pausados', {}, token)],
     ['projetos', 'listar_projetos', () => callTool('listar_projetos', {}, token)],
   ];
 
@@ -134,6 +136,7 @@ app.post('/api/snapshot', async (req, res) => {
     resumoUsuarios: null,
     saudeContasFb: null,
     fadigaCriativo: null,
+    adsetsPausados: null,
     projetos: null,
     errors: [],
   };
@@ -209,6 +212,85 @@ app.post('/api/chat', async (req, res) => {
       res.write(`event: error\ndata: ${JSON.stringify({ message: 'Falha inesperada no CORTEX.' })}\n\n`);
       res.end();
     }
+  }
+});
+
+// ══════════════════ DASHBOARD DE FLOORS (ruler-mcp, sob demanda) ═══════════
+// Rotas HTTP que o dashboard usa pra carregar e EDITAR price floors direto na UI,
+// sem passar pelo chat. A edição (apply) roteia pela MESMA trava do chat
+// (floor-guard.js): preview→confirm. av_bearer nunca é logado nem devolvido.
+
+// Carrega o panorama + as regras de um domínio (resumo_floors + listar_price_rules).
+app.post('/api/ruler/rules', async (req, res) => {
+  const { rulerToken, avBearer, network, domain } = req.body || {};
+  if (!rulerToken) return res.status(400).json({ ok: false, error: 'rulerToken ausente.' });
+  if (!network || !domain) return res.status(400).json({ ok: false, error: 'network e domain são obrigatórios.' });
+
+  const [resumo, rules] = await Promise.allSettled([
+    callRulerTool('resumo_floors', { network, domain }, rulerToken, avBearer),
+    callRulerTool('listar_price_rules', { network, domain }, rulerToken, avBearer),
+  ]);
+
+  const secrets = { avBearer, rulerToken };
+  if (resumo.status === 'rejected' && rules.status === 'rejected') {
+    const authErr = [resumo, rules].some((r) => r.reason instanceof McpAuthError);
+    return res.status(authErr ? 401 : 502).json({
+      ok: false,
+      error: redactSecrets(resumo.reason?.message || 'ruler-mcp indisponível.', secrets),
+    });
+  }
+
+  const errors = [];
+  if (resumo.status === 'rejected') errors.push({ tool: 'resumo_floors', error: redactSecrets(resumo.reason?.message || 'falha', secrets) });
+  if (rules.status === 'rejected') errors.push({ tool: 'listar_price_rules', error: redactSecrets(rules.reason?.message || 'falha', secrets) });
+
+  res.status(200).json({
+    ok: true,
+    network,
+    domain,
+    resumo: resumo.status === 'fulfilled' ? resumo.value : null,
+    rules: rules.status === 'fulfilled' ? rules.value : null,
+    errors,
+  });
+});
+
+// Sugestões de ajuste (sugerir_floor) — não aplica nada.
+app.post('/api/ruler/sugestoes', async (req, res) => {
+  const { rulerToken, avBearer, network, domain } = req.body || {};
+  if (!rulerToken || !network || !domain) {
+    return res.status(400).json({ ok: false, error: 'rulerToken, network e domain são obrigatórios.' });
+  }
+  try {
+    const data = await callRulerTool('sugerir_floor', { network, domain }, rulerToken, avBearer);
+    res.status(200).json({ ok: true, data });
+  } catch (err) {
+    const status = err instanceof McpAuthError ? 401 : 502;
+    res.status(status).json({ ok: false, error: redactSecrets(err?.message || 'falha ao sugerir floor.', { avBearer, rulerToken }) });
+  }
+});
+
+// Edição manual de floor. SEM confirm → preview (diff antes→depois); COM confirm →
+// aplica de verdade, mas SÓ se houve um preview recente do mesmo network/domain
+// (trava server-side compartilhada com o chat). actor = managerName (definido aqui).
+app.post('/api/ruler/apply', async (req, res) => {
+  const { rulerToken, avBearer, network, domain, rules, confirm, managerName } = req.body || {};
+  if (!rulerToken) return res.status(400).json({ ok: false, error: 'rulerToken ausente.' });
+  if (!network || !domain) return res.status(400).json({ ok: false, error: 'network e domain são obrigatórios.' });
+  if (!Array.isArray(rules) || rules.length === 0) return res.status(400).json({ ok: false, error: 'rules[] vazio.' });
+
+  try {
+    const { mode, data } = await guardedApplyFloor(
+      { network, domain, rules, confirm: confirm === true },
+      { rulerToken, avBearer, managerName, callRuler: callRulerTool },
+    );
+    res.status(200).json({ ok: true, mode, data });
+  } catch (err) {
+    if (err instanceof McpAuthError) return res.status(401).json({ ok: false, error: 'Chave do ruler-mcp inválida.' });
+    // Confirm barrado pela trava (sem preview) → 409, sinaliza que precisa do preview.
+    if (/TRAVA DE SEGURAN/i.test(err?.message || '')) {
+      return res.status(409).json({ ok: false, needsPreview: true, error: err.message });
+    }
+    res.status(502).json({ ok: false, error: redactSecrets(err?.message || 'falha ao aplicar floor.', { avBearer, rulerToken }) });
   }
 });
 
